@@ -8,7 +8,7 @@
 namespace CardGFX {
 
 /**
- * Modal: a centered overlay dialog with title, message, and up to 3 buttons.
+ * Modal: a centered overlay dialog with title, message, and up to 4 buttons.
  *
  * Designed to be pushed as a scene overlay. The Modal handles its own
  * focus between buttons and calls the appropriate callback on selection.

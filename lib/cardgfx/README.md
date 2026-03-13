@@ -66,7 +66,7 @@ void loop() {
 | `TextInput` | Keyboard text entry with cursor + blink  |
 | `List`      | Scrollable vertical list with selection  |
 | `Grid`      | 2D navigable grid (chessboard, menus)    |
-| `Modal`     | Overlay dialog with buttons              |
+| `Modal`     | Overlay dialog with up to 4 buttons      |
 | `StatusBar` | Slim bar with left/center/right segments |
 | `Bitmap`    | Static image (1-bit or RGB565)           |
 
@@ -98,6 +98,10 @@ CardGFX::input().bind(Key::ESCAPE, Mod::NONE, 1, []() {
     return true;
 });
 ```
+
+### Arrow Key Mapping
+
+The Cardputer has no hardware arrow keys. CardGFX automatically maps bare `;` `,` `.` `/` to UP, LEFT, DOWN, RIGHT at the framework level (`Scene::routeInput()`). This mapping is suppressed when the focused widget has `acceptsText()` set (e.g., `TextInput`), so those keys can be typed normally into text fields.
 
 ## Grid Widget
 
