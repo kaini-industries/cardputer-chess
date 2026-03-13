@@ -34,7 +34,7 @@ When a pawn reaches the back rank, a dialog appears with four buttons:
 - **Rook** -- promote to rook
 - **Bishop** -- promote to bishop
 
-Use **,** / **/** (left/right) to navigate between buttons, **Enter** to confirm.
+Use **,** **/** (left/right) to navigate between buttons, **Enter** to confirm.
 
 ### Game Over
 
