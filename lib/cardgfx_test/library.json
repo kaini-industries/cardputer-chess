@@ -1,0 +1,7 @@
+{
+  "name": "CardGFX Test",
+  "version": "1.0.0",
+  "description": "Test harness and assertion tests for CardGFX UI framework",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}
