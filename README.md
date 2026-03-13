@@ -46,15 +46,15 @@ When checkmate, stalemate, 50-move rule, or insufficient material is detected, a
 ## Screen Layout
 
 ```
-+---------- StatusBar (240x12) ----------+
-|  "White"     "Move 1"       "Check!"  |
-+--- Board (120x120) --+- Side (120x123) -+
-|                       | Moves (label)    |
-|    8x8 grid           | Move history     |
-|    15px cells          |   (scrollable)   |
-|                       |                  |
-|                       | [U]ndo [N]ew     |
-+-----------------------+------------------+
++----------- StatusBar (240x12) -----------+
+|  "White"      "Move 1"       "Check!"    |
++--- Board (120x120) -+-- Side (120x123) --+
+|                      | Moves (label)      |
+|    8x8 grid          | Move history       |
+|    15px cells         |   (scrollable)     |
+|                      |                    |
+|                      | [U]ndo [N]ew       |
++----------------------+--------------------+
 ```
 
 ## Building
