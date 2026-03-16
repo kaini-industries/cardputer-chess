@@ -60,6 +60,14 @@ private:
     // Pending promotion
     Move m_pendingPromotion;
 
+    // ── Capture Animation ────────────────────────────────────────
+    struct CaptureAnim {
+        uint8_t  col = 0xFF;       // Board column (0xFF = inactive)
+        uint8_t  row = 0xFF;       // Board row
+        uint32_t elapsed = 0;      // Ms elapsed
+        static constexpr uint32_t DURATION = 250; // Total ms
+    } m_captureAnim;
+
     // ── AI Mode ────────────────────────────────────────────────
     AIDifficulty m_aiDifficulty = AIDifficulty::None;
     PieceColor   m_aiColor = PieceColor::Black;

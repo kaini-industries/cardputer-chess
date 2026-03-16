@@ -165,7 +165,7 @@ void ChessScene::onEnter() {
     focusChain().focusWidget(&m_boardGrid);
 }
 
-void ChessScene::onTick(uint32_t /*dt_ms*/) {
+void ChessScene::onTick(uint32_t dt_ms) {
     if (m_netMode == NetworkMode::Online) {
         pollNetwork();
     }
@@ -187,6 +187,12 @@ void ChessScene::onTick(uint32_t /*dt_ms*/) {
             m_aiThinking = false;
             executeMove(aiMove);
         }
+    }
+
+    // Capture animation tick
+    if (m_captureAnim.col != 0xFF && m_captureAnim.elapsed < CaptureAnim::DURATION) {
+        m_captureAnim.elapsed += dt_ms;
+        m_boardGrid.markDirty(); // Keep redrawing during animation
     }
 }
 
@@ -279,6 +285,7 @@ void ChessScene::newGame() {
     m_historyCount = 0;
     m_legalMoves.clear();
 
+    m_captureAnim.col = 0xFF; // Clear any active animation
     m_moveList.clearItems();
     m_boardGrid.clearAllFlags();
     // Start cursor on own king (e1 for White, e8 for Black)
@@ -400,6 +407,13 @@ void ChessScene::executeMove(const Move& move) {
     bool isCapture = !m_board.at(move.to.col, move.to.row).empty() || move.isEnPassant;
     char sanBuf[12];
     moveToSAN(sanBuf, sizeof(sanBuf), move, m_board, isCapture);
+
+    // Trigger capture animation
+    if (isCapture) {
+        m_captureAnim.col = move.to.col;
+        m_captureAnim.row = move.to.row;
+        m_captureAnim.elapsed = 0;
+    }
 
     // Store history for undo
     if (m_historyCount < MAX_HISTORY) {
@@ -729,6 +743,38 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
         // Bottom-right corner
         for (int i = 0; i < 3; i++) {
             canvas.drawHLine(cx + cellW - 3 + i, cy + cellH - 1 - i, 3 - i, theme.error);
+        }
+    }
+
+    // ── Capture animation ──────────────────────────────────────────
+    if (self->m_captureAnim.col == boardCol &&
+        self->m_captureAnim.row == boardRow &&
+        self->m_captureAnim.elapsed < CaptureAnim::DURATION) {
+
+        float t = (float)self->m_captureAnim.elapsed / (float)CaptureAnim::DURATION;
+        int16_t midX = cx + cellW / 2;
+        int16_t midY = cy + cellH / 2;
+
+        if (t < 0.2f) {
+            // Phase 1: bright flash overlay (fades from full to nothing)
+            canvas.drawRect(cx, cy, cellW, cellH, theme.error);
+            canvas.drawRect(cx + 1, cy + 1, cellW - 2, cellH - 2, theme.error);
+        } else {
+            // Phase 2: 4 dots expanding diagonally from center
+            float pt = (t - 0.2f) / 0.8f; // 0→1 over remaining time
+            int16_t dist = (int16_t)(pt * 8); // Expand up to 8 pixels out
+            int16_t r = (pt < 0.5f) ? 2 : 1; // Dots shrink as they fade
+
+            // 4 diagonal directions
+            int16_t offsets[4][2] = {{-1,-1},{1,-1},{-1,1},{1,1}};
+            for (int d = 0; d < 4; d++) {
+                int16_t dx = midX + offsets[d][0] * dist;
+                int16_t dy = midY + offsets[d][1] * dist;
+                // Only draw if within cell bounds
+                if (dx >= cx && dx < cx + cellW && dy >= cy && dy < cy + cellH) {
+                    canvas.fillCircle(dx, dy, r, theme.error);
+                }
+            }
         }
     }
 
