@@ -1,5 +1,7 @@
 #include "chess_scene.h"
 #include "chess_rules.h"
+#include "esp_now_transport.h"
+#include <Arduino.h>
 #include <cstdio>
 #include <cstring>
 
@@ -164,7 +166,9 @@ void ChessScene::onEnter() {
 }
 
 void ChessScene::onTick(uint32_t /*dt_ms*/) {
-    // No animation needed for now
+    if (m_netMode == NetworkMode::Online) {
+        pollNetwork();
+    }
 }
 
 bool ChessScene::onInput(const InputEvent& event) {
@@ -178,19 +182,22 @@ bool ChessScene::onInput(const InputEvent& event) {
     switch (event.key) {
     case 'u':
     case 'U':
-        undoLastMove();
-        return true;
+        if (m_netMode != NetworkMode::Online) {
+            undoLastMove();
+            return true;
+        }
+        break;
 
     case 'n':
     case 'N':
+        if (m_netMode == NetworkMode::Online) break; // Disabled in Online mode
         // New game -- show confirmation modal
         m_gameOverModal.setTitle("New Game?");
         m_gameOverModal.setMessage("Start a new game?");
         m_gameOverModal.clearButtons();
         m_gameOverModal.addButton("Yes", [this]() {
             m_gameOverModal.hide();
-            newGame();
-            focusChain().focusWidget(&m_boardGrid);
+            CardGFX::scenes().pop(); // Back to lobby
         });
         m_gameOverModal.addButton("No", [this]() {
             m_gameOverModal.hide();
@@ -199,6 +206,34 @@ bool ChessScene::onInput(const InputEvent& event) {
         m_gameOverModal.show();
         focusChain().focusWidget(&m_gameOverModal);
         return true;
+
+    case 'r':
+    case 'R':
+        if (m_netMode == NetworkMode::Online && m_uiState != UIState::GameOver) {
+            // Resign confirmation
+            m_gameOverModal.setTitle("Resign?");
+            m_gameOverModal.setMessage("Give up this game?");
+            m_gameOverModal.clearButtons();
+            m_gameOverModal.addButton("Yes", [this]() {
+                m_gameOverModal.hide();
+                // Send resign to opponent
+                ResignMsg msg;
+                EspNowTransport::instance().send(
+                    reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
+                // Show result
+                const char* winner = (m_localColor == PieceColor::White)
+                                    ? "Black wins!" : "White wins!";
+                showGameOverModal("Resigned", winner);
+            });
+            m_gameOverModal.addButton("No", [this]() {
+                m_gameOverModal.hide();
+                focusChain().focusWidget(&m_boardGrid);
+            });
+            m_gameOverModal.show();
+            focusChain().focusWidget(&m_gameOverModal);
+            return true;
+        }
+        break;
 
     case Key::ESCAPE:
         if (m_uiState == UIState::ShowMoves) {
@@ -225,9 +260,17 @@ void ChessScene::newGame() {
 
     m_moveList.clearItems();
     m_boardGrid.clearAllFlags();
-    m_boardGrid.setCursor(4, 7); // Start cursor on e1 (white king)
+    // Start cursor on own king (e1 for White, e8 for Black)
+    m_boardGrid.setCursor(toGridCol(4), toGridRow(0));
     updateStatusBar();
     m_boardGrid.markDirty();
+
+    // Update hint bar for game mode
+    if (m_netMode == NetworkMode::Online) {
+        m_hintBar.setText("[R]esign");
+    } else {
+        m_hintBar.setText("[U]ndo [N]ew");
+    }
 }
 
 void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
@@ -235,9 +278,9 @@ void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
         return;
     }
 
-    // Convert grid coordinates to board coordinates (flip vertical)
-    uint8_t boardCol = gridCol;
-    uint8_t boardRow = 7 - gridRow;
+    // Convert grid coordinates to board coordinates (respects board flipping)
+    uint8_t boardCol = toBoardCol(gridCol);
+    uint8_t boardRow = toBoardRow(gridRow);
 
     if (m_uiState == UIState::SelectPiece) {
         selectPiece(boardCol, boardRow);
@@ -273,6 +316,9 @@ void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
 void ChessScene::selectPiece(uint8_t col, uint8_t boardRow) {
     Piece p = m_board.at(col, boardRow);
     if (p.empty() || p.color != m_board.sideToMove()) return;
+
+    // In Online mode, can only move your own color
+    if (m_netMode == NetworkMode::Online && p.color != m_localColor) return;
 
     m_selectedSquare = makeSquare(col, boardRow);
 
@@ -343,6 +389,11 @@ void ChessScene::executeMove(const Move& move) {
     m_lastFrom = move.from;
     m_lastTo = move.to;
 
+    // Send move to remote player (only if this was a local move)
+    if (m_netMode == NetworkMode::Online && !m_applyingRemoteMove) {
+        sendMove(move);
+    }
+
     // Update UI
     deselectPiece();
     addMoveToList(sanBuf);
@@ -354,6 +405,7 @@ void ChessScene::executeMove(const Move& move) {
 }
 
 void ChessScene::undoLastMove() {
+    if (m_netMode == NetworkMode::Online) return; // Disabled in network mode
     if (m_historyCount == 0) return;
     if (m_uiState == UIState::PromotionPending) return;
 
@@ -391,9 +443,15 @@ void ChessScene::undoLastMove() {
 }
 
 void ChessScene::updateStatusBar() {
-    // Left: whose turn
-    const char* turn = (m_board.sideToMove() == PieceColor::White) ? "White" : "Black";
-    m_statusBar.setLeft(turn);
+    // Left: whose turn / online status
+    if (m_netMode == NetworkMode::Online) {
+        const char* turn = (m_board.sideToMove() == m_localColor)
+                          ? "Your turn" : "Waiting...";
+        m_statusBar.setLeft(turn);
+    } else {
+        const char* turn = (m_board.sideToMove() == PieceColor::White) ? "White" : "Black";
+        m_statusBar.setLeft(turn);
+    }
 
     // Center: move number
     char moveBuf[16];
@@ -415,22 +473,22 @@ void ChessScene::updateBoardHighlights() {
 
     // Mark last move squares
     if (!isNoSquare(m_lastFrom)) {
-        m_boardGrid.setMarked(m_lastFrom.col, 7 - m_lastFrom.row, true);
+        m_boardGrid.setMarked(toGridCol(m_lastFrom.col), toGridRow(m_lastFrom.row), true);
     }
     if (!isNoSquare(m_lastTo)) {
-        m_boardGrid.setMarked(m_lastTo.col, 7 - m_lastTo.row, true);
+        m_boardGrid.setMarked(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row), true);
     }
 
     // Show selected piece
     if (!isNoSquare(m_selectedSquare)) {
-        m_boardGrid.setSelected(m_selectedSquare.col, 7 - m_selectedSquare.row, true);
+        m_boardGrid.setSelected(toGridCol(m_selectedSquare.col), toGridRow(m_selectedSquare.row), true);
     }
 
     // Show valid move destinations
     for (uint8_t i = 0; i < m_legalMoves.count; i++) {
         const Move& m = m_legalMoves.moves[i];
         // Only mark unique destination squares (promotion generates 4 moves to same square)
-        m_boardGrid.setHighlighted(m.to.col, 7 - m.to.row, true);
+        m_boardGrid.setHighlighted(toGridCol(m.to.col), toGridRow(m.to.row), true);
     }
 
     m_boardGrid.markDirty();
@@ -516,11 +574,18 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
     m_gameOverModal.setTitle(title);
     m_gameOverModal.setMessage(message);
 
-    m_gameOverModal.addButton("New Game", [this]() {
-        m_gameOverModal.hide();
-        newGame();
-        focusChain().focusWidget(&m_boardGrid);
-    });
+    if (m_netMode == NetworkMode::Online) {
+        m_gameOverModal.addButton("Lobby", [this]() {
+            m_gameOverModal.hide();
+            clearNetworkMode();
+            CardGFX::scenes().pop();
+        });
+    } else {
+        m_gameOverModal.addButton("Menu", [this]() {
+            m_gameOverModal.hide();
+            CardGFX::scenes().pop(); // Back to lobby
+        });
+    }
     m_gameOverModal.addButton("View", [this]() {
         m_gameOverModal.hide();
         // Stay in GameOver state but let user view the board
@@ -537,10 +602,11 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
                              int16_t cx, int16_t cy, uint8_t cellW, uint8_t cellH,
                              Grid::CellState state, const Theme& theme, void* ctx) {
     ChessScene* self = static_cast<ChessScene*>(ctx);
-    uint8_t boardRow = 7 - gridRow;
+    uint8_t boardCol = self->toBoardCol(col);
+    uint8_t boardRow = self->toBoardRow(gridRow);
 
     // ── Cell background ───────────────────────────────────────────
-    bool lightSquare = ((col + boardRow) % 2 != 0);
+    bool lightSquare = ((boardCol + boardRow) % 2 != 0);
     uint16_t cellBg = lightSquare ? theme.gridCellA : theme.gridCellB;
 
     if (state.marked)    cellBg = theme.accentMuted;
@@ -550,7 +616,7 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     canvas.fillRect(cx, cy, cellW, cellH, cellBg);
 
     // ── Valid move dot (on empty highlighted squares) ─────────────
-    Piece piece = self->m_board.at(col, boardRow);
+    Piece piece = self->m_board.at(boardCol, boardRow);
     if (state.highlight && piece.empty() && !state.selected) {
         // Small dot in center
         int16_t dotCx = cx + cellW / 2;
@@ -664,4 +730,175 @@ void ChessScene::rebuildMoveList() {
     if (m_moveList.itemCount() > 0) {
         m_moveList.scrollToBottom();
     }
+}
+
+// ── Network Mode ─────────────────────────────────────────────────────
+
+void ChessScene::setNetworkMode(PieceColor localColor) {
+    m_netMode = NetworkMode::Online;
+    m_localColor = localColor;
+    m_boardFlipped = (localColor == PieceColor::Black);
+    m_awaitingAck = false;
+    m_retryCount = 0;
+    m_disconnectShown = false;
+    newGame();
+}
+
+void ChessScene::clearNetworkMode() {
+    m_netMode = NetworkMode::Local;
+    m_localColor = PieceColor::White;
+    m_boardFlipped = false;
+    m_applyingRemoteMove = false;
+    m_awaitingAck = false;
+    m_disconnectShown = false;
+}
+
+void ChessScene::sendMove(const Move& move) {
+    uint8_t seq = (uint8_t)(m_historyCount); // Use history count as sequence
+    m_lastSentMove = moveToNetMsg(move, seq);
+    m_lastSentSeq = seq;
+    m_awaitingAck = true;
+    m_retryCount = 0;
+    m_lastSendTime = millis();
+
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&m_lastSentMove), sizeof(m_lastSentMove));
+}
+
+void ChessScene::sendHeartbeat() {
+    HeartbeatMsg hb;
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&hb), sizeof(hb));
+}
+
+void ChessScene::pollNetwork() {
+    auto& transport = EspNowTransport::instance();
+    uint32_t now = millis();
+
+    // Process received packets
+    uint8_t buf[32];
+    uint8_t mac[6];
+    while (transport.hasReceived()) {
+        uint8_t len = transport.receive(buf, sizeof(buf), mac);
+        if (len == 0) break;
+
+        // Dismiss disconnect modal if we get any packet
+        if (m_disconnectShown) {
+            m_disconnectShown = false;
+            if (m_gameOverModal.isVisible()) {
+                m_gameOverModal.hide();
+                focusChain().focusWidget(&m_boardGrid);
+            }
+        }
+
+        auto msgType = static_cast<NetMsgType>(buf[0]);
+
+        switch (msgType) {
+        case NetMsgType::MoveMsg:
+            if (len >= sizeof(MoveNetMsg)) {
+                MoveNetMsg moveMsg;
+                memcpy(&moveMsg, buf, sizeof(MoveNetMsg));
+                onRemoteMoveReceived(moveMsg);
+            }
+            break;
+
+        case NetMsgType::MoveAck:
+            if (len >= sizeof(MoveAckMsg)) {
+                MoveAckMsg ack;
+                memcpy(&ack, buf, sizeof(MoveAckMsg));
+                if (m_awaitingAck && ack.seq == m_lastSentSeq) {
+                    m_awaitingAck = false;
+                }
+            }
+            break;
+
+        case NetMsgType::Heartbeat:
+            // Just the receive timestamp update is enough
+            break;
+
+        case NetMsgType::Resign: {
+            const char* winner = (m_localColor == PieceColor::White)
+                                ? "White wins!" : "Black wins!";
+            showGameOverModal("Opponent Resigned", winner);
+            break;
+        }
+
+        default:
+            break;
+        }
+    }
+
+    // Retransmit unacked moves
+    if (m_awaitingAck && (now - m_lastSendTime) > 200) {
+        m_retryCount++;
+        if (m_retryCount > 25) { // ~5 seconds
+            m_awaitingAck = false;
+            onConnectionLost();
+        } else {
+            m_lastSendTime = now;
+            transport.send(
+                reinterpret_cast<const uint8_t*>(&m_lastSentMove),
+                sizeof(m_lastSentMove));
+        }
+    }
+
+    // Send heartbeat every second when idle
+    if (!m_awaitingAck && (now - m_lastSendTime) > 1000) {
+        m_lastSendTime = now;
+        sendHeartbeat();
+    }
+
+    // Check for connection timeout (3 seconds without any packet)
+    if (!m_disconnectShown && transport.msSinceLastReceive() > 3000 &&
+        m_uiState != UIState::GameOver) {
+        onConnectionLost();
+    }
+}
+
+void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
+    // Send ack immediately
+    MoveAckMsg ack;
+    ack.seq = msg.seq;
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+
+    // Deduplicate: if we've already applied this move, skip
+    if (msg.seq < m_historyCount) return;
+
+    // Convert to Move and validate
+    Move move = netMsgToMove(msg);
+
+    MoveList legal;
+    ChessRules::generateLegal(m_board, legal);
+    if (!legal.contains(move)) {
+        return; // Invalid move — ignore (shouldn't happen)
+    }
+
+    // Apply the remote move
+    m_applyingRemoteMove = true;
+    executeMove(move);
+    m_applyingRemoteMove = false;
+}
+
+void ChessScene::onConnectionLost() {
+    if (m_disconnectShown) return;
+    m_disconnectShown = true;
+
+    m_gameOverModal.clearButtons();
+    m_gameOverModal.setTitle("Disconnected");
+    m_gameOverModal.setMessage("Lost connection");
+
+    m_gameOverModal.addButton("Wait", [this]() {
+        m_gameOverModal.hide();
+        m_disconnectShown = false;
+        focusChain().focusWidget(&m_boardGrid);
+    });
+    m_gameOverModal.addButton("Quit", [this]() {
+        m_gameOverModal.hide();
+        clearNetworkMode();
+        CardGFX::scenes().pop();
+    });
+
+    m_gameOverModal.show();
+    focusChain().focusWidget(&m_gameOverModal);
 }

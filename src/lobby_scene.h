@@ -1,0 +1,61 @@
+#ifndef LOBBY_SCENE_H
+#define LOBBY_SCENE_H
+
+#include <cardgfx.h>
+#include "chess_net_protocol.h"
+
+using namespace CardGFX;
+
+class ChessScene; // Forward declaration
+
+// =====================================================================
+// LobbyScene: Pre-game screen for local/online mode selection,
+// ESP-NOW discovery, and pairing.
+// =====================================================================
+
+class LobbyScene : public Scene {
+public:
+    LobbyScene();
+    void setup(ChessScene* chessScene);
+
+    // Scene lifecycle
+    void onEnter() override;
+    void onExit() override;
+    void onTick(uint32_t dt_ms) override;
+    bool onInput(const InputEvent& event) override;
+
+private:
+    // ── State Machine ────────────────────────────────────────────
+    enum class LobbyState : uint8_t {
+        Menu,       // Showing mode selection
+        Hosting,    // Broadcasting, waiting for joiner
+        Joining,    // Listening for host broadcasts
+        Paired      // Connected, transitioning to game
+    };
+
+    LobbyState m_state = LobbyState::Menu;
+    ChessScene* m_chessScene = nullptr;
+
+    // ── Pairing State ────────────────────────────────────────────
+    uint16_t m_gameId = 0;
+    uint32_t m_lastBroadcast = 0;
+    uint32_t m_stateStartTime = 0;
+    uint8_t  m_peerMac[6] = {};
+    PieceColor m_localColor = PieceColor::White;
+
+    // ── Widgets ──────────────────────────────────────────────────
+    StatusBar m_statusBar;
+    Label     m_titleLabel;
+    Label     m_statusLabel;
+    Modal     m_menuModal;
+
+    // ── Methods ──────────────────────────────────────────────────
+    void showMenu();
+    void startHosting();
+    void startJoining();
+    void onPaired();
+    void cancelPairing();
+    void startLocalGame();
+};
+
+#endif // LOBBY_SCENE_H

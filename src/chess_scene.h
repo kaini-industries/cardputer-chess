@@ -4,11 +4,12 @@
 #include <cardgfx.h>
 #include "chess_board.h"
 #include "chess_rules.h"
+#include "chess_net_protocol.h"
 
 using namespace CardGFX;
 
 // =====================================================================
-// ChessScene: pass-and-play chess game UI.
+// ChessScene: chess game UI with local and online multiplayer.
 //
 // Layout (240x135):
 //   StatusBar     (0,0)   240x12  -- turn indicator, move number, status
@@ -58,6 +59,21 @@ private:
     // Pending promotion
     Move m_pendingPromotion;
 
+    // ── Network Mode ────────────────────────────────────────────
+    enum class NetworkMode : uint8_t { Local, Online };
+    NetworkMode m_netMode = NetworkMode::Local;
+    PieceColor  m_localColor = PieceColor::White;
+    bool        m_boardFlipped = false;
+    bool        m_applyingRemoteMove = false;
+
+    // Network ack/retransmit state
+    bool     m_awaitingAck = false;
+    uint8_t  m_lastSentSeq = 0;
+    uint32_t m_lastSendTime = 0;
+    uint8_t  m_retryCount = 0;
+    MoveNetMsg m_lastSentMove;    // For retransmission
+    bool     m_disconnectShown = false;
+
     // ── Widgets ───────────────────────────────────────────────────
     StatusBar m_statusBar;
     Grid      m_boardGrid;
@@ -82,6 +98,32 @@ private:
     void showPromotionModal(const Move& baseMove);
     void showGameOverModal(const char* title, const char* message);
     void rebuildMoveList();
+
+    // Network methods
+    void pollNetwork();
+    void sendMove(const Move& move);
+    void onRemoteMoveReceived(const MoveNetMsg& msg);
+    void onConnectionLost();
+    void sendHeartbeat();
+
+    // Coordinate helpers (board flipping for Black perspective)
+    uint8_t toGridRow(uint8_t boardRow) const {
+        return m_boardFlipped ? boardRow : (7 - boardRow);
+    }
+    uint8_t toGridCol(uint8_t boardCol) const {
+        return m_boardFlipped ? (7 - boardCol) : boardCol;
+    }
+    uint8_t toBoardRow(uint8_t gridRow) const {
+        return m_boardFlipped ? gridRow : (7 - gridRow);
+    }
+    uint8_t toBoardCol(uint8_t gridCol) const {
+        return m_boardFlipped ? (7 - gridCol) : gridCol;
+    }
+
+public:
+    // Called by LobbyScene to configure network mode before pushing
+    void setNetworkMode(PieceColor localColor);
+    void clearNetworkMode();
 
     // Cell renderer -- draws pieces and highlights on the board
     static void renderCell(Canvas& canvas, uint8_t col, uint8_t row,
