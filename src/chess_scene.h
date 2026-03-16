@@ -4,6 +4,7 @@
 #include <cardgfx.h>
 #include "chess_board.h"
 #include "chess_rules.h"
+#include "chess_ai.h"
 #include "chess_net_protocol.h"
 
 using namespace CardGFX;
@@ -58,6 +59,11 @@ private:
 
     // Pending promotion
     Move m_pendingPromotion;
+
+    // ── AI Mode ────────────────────────────────────────────────
+    AIDifficulty m_aiDifficulty = AIDifficulty::None;
+    PieceColor   m_aiColor = PieceColor::Black;
+    bool         m_aiThinking = false;
 
     // ── Network Mode ────────────────────────────────────────────
     enum class NetworkMode : uint8_t { Local, Online };
@@ -121,6 +127,10 @@ private:
     }
 
 public:
+    // Called by LobbyScene to configure AI mode before pushing
+    void setAIMode(AIDifficulty difficulty, PieceColor aiColor);
+    void clearAIMode();
+
     // Called by LobbyScene to configure network mode before pushing
     void setNetworkMode(PieceColor localColor);
     void clearNetworkMode();

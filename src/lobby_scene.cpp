@@ -66,6 +66,10 @@ void LobbyScene::showMenu() {
         m_menuModal.hide();
         startLocalGame();
     });
+    m_menuModal.addButton("vs AI", [this]() {
+        m_menuModal.hide();
+        showAIDifficultyMenu();
+    });
     m_menuModal.addButton("Host", [this]() {
         m_menuModal.hide();
         startHosting();
@@ -81,6 +85,61 @@ void LobbyScene::showMenu() {
 
 void LobbyScene::startLocalGame() {
     m_chessScene->clearNetworkMode();
+    CardGFX::scenes().push(m_chessScene);
+}
+
+void LobbyScene::showAIDifficultyMenu() {
+    m_state = LobbyState::AIDifficulty;
+    m_statusBar.setLeft("vs AI");
+    m_statusBar.setRight("ESC=Back");
+    m_titleLabel.setVisible(false);
+
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Difficulty");
+    m_menuModal.setMessage("Choose level:");
+
+    m_menuModal.addButton("Easy", [this]() {
+        m_selectedDifficulty = AIDifficulty::Easy;
+        m_menuModal.hide();
+        showAIColorMenu();
+    });
+    m_menuModal.addButton("Medium", [this]() {
+        m_selectedDifficulty = AIDifficulty::Medium;
+        m_menuModal.hide();
+        showAIColorMenu();
+    });
+    m_menuModal.addButton("Hard", [this]() {
+        m_selectedDifficulty = AIDifficulty::Hard;
+        m_menuModal.hide();
+        showAIColorMenu();
+    });
+
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+}
+
+void LobbyScene::showAIColorMenu() {
+    m_state = LobbyState::AIColor;
+
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Play as");
+    m_menuModal.setMessage("Choose your color:");
+
+    m_menuModal.addButton("White", [this]() {
+        m_menuModal.hide();
+        startAIGame(PieceColor::Black); // AI plays Black
+    });
+    m_menuModal.addButton("Black", [this]() {
+        m_menuModal.hide();
+        startAIGame(PieceColor::White); // AI plays White
+    });
+
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+}
+
+void LobbyScene::startAIGame(PieceColor aiColor) {
+    m_chessScene->setAIMode(m_selectedDifficulty, aiColor);
     CardGFX::scenes().push(m_chessScene);
 }
 
@@ -233,10 +292,20 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
 bool LobbyScene::onInput(const InputEvent& event) {
     if (!event.isDown()) return false;
 
-    // ESC cancels pairing
+    // ESC cancels pairing or goes back in AI menus
     if (event.key == Key::ESCAPE) {
         if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining) {
             cancelPairing();
+            return true;
+        }
+        if (m_state == LobbyState::AIDifficulty) {
+            m_menuModal.hide();
+            showMenu();
+            return true;
+        }
+        if (m_state == LobbyState::AIColor) {
+            m_menuModal.hide();
+            showAIDifficultyMenu();
             return true;
         }
     }

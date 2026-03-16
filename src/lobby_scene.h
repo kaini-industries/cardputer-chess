@@ -2,6 +2,7 @@
 #define LOBBY_SCENE_H
 
 #include <cardgfx.h>
+#include "chess_ai.h"
 #include "chess_net_protocol.h"
 
 using namespace CardGFX;
@@ -27,14 +28,19 @@ public:
 private:
     // ── State Machine ────────────────────────────────────────────
     enum class LobbyState : uint8_t {
-        Menu,       // Showing mode selection
-        Hosting,    // Broadcasting, waiting for joiner
-        Joining,    // Listening for host broadcasts
-        Paired      // Connected, transitioning to game
+        Menu,           // Showing mode selection
+        AIDifficulty,   // Choosing AI difficulty
+        AIColor,        // Choosing player color vs AI
+        Hosting,        // Broadcasting, waiting for joiner
+        Joining,        // Listening for host broadcasts
+        Paired          // Connected, transitioning to game
     };
 
     LobbyState m_state = LobbyState::Menu;
     ChessScene* m_chessScene = nullptr;
+
+    // ── AI State ────────────────────────────────────────────────
+    AIDifficulty m_selectedDifficulty = AIDifficulty::None;
 
     // ── Pairing State ────────────────────────────────────────────
     uint16_t m_gameId = 0;
@@ -51,6 +57,9 @@ private:
 
     // ── Methods ──────────────────────────────────────────────────
     void showMenu();
+    void showAIDifficultyMenu();
+    void showAIColorMenu();
+    void startAIGame(PieceColor aiColor);
     void startHosting();
     void startJoining();
     void onPaired();

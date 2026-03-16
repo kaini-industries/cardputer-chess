@@ -169,6 +169,25 @@ void ChessScene::onTick(uint32_t /*dt_ms*/) {
     if (m_netMode == NetworkMode::Online) {
         pollNetwork();
     }
+
+    // AI turn: two-phase approach so "Thinking..." renders before search blocks.
+    // Phase 1: set thinking flag → status bar updates → frame renders.
+    // Phase 2 (next tick): run search → execute move.
+    if (m_aiDifficulty != AIDifficulty::None &&
+        m_uiState == UIState::SelectPiece &&
+        m_board.sideToMove() == m_aiColor) {
+
+        if (!m_aiThinking) {
+            // Phase 1: mark thinking, let the frame render "Thinking..."
+            m_aiThinking = true;
+            updateStatusBar();
+        } else {
+            // Phase 2: run the search
+            Move aiMove = ChessAI::findBestMove(m_board, m_aiDifficulty);
+            m_aiThinking = false;
+            executeMove(aiMove);
+        }
+    }
 }
 
 bool ChessScene::onInput(const InputEvent& event) {
@@ -191,12 +210,14 @@ bool ChessScene::onInput(const InputEvent& event) {
     case 'n':
     case 'N':
         if (m_netMode == NetworkMode::Online) break; // Disabled in Online mode
+        if (m_aiThinking) break; // Disabled while AI is thinking
         // New game -- show confirmation modal
         m_gameOverModal.setTitle("New Game?");
         m_gameOverModal.setMessage("Start a new game?");
         m_gameOverModal.clearButtons();
         m_gameOverModal.addButton("Yes", [this]() {
             m_gameOverModal.hide();
+            if (m_aiDifficulty != AIDifficulty::None) clearAIMode();
             CardGFX::scenes().pop(); // Back to lobby
         });
         m_gameOverModal.addButton("No", [this]() {
@@ -320,6 +341,9 @@ void ChessScene::selectPiece(uint8_t col, uint8_t boardRow) {
     // In Online mode, can only move your own color
     if (m_netMode == NetworkMode::Online && p.color != m_localColor) return;
 
+    // In AI mode, can't move the AI's pieces
+    if (m_aiDifficulty != AIDifficulty::None && p.color == m_aiColor) return;
+
     m_selectedSquare = makeSquare(col, boardRow);
 
     // Get legal moves for this piece
@@ -403,8 +427,8 @@ void ChessScene::executeMove(const Move& move) {
     // Check for game end
     checkGameEnd();
 
-    // Auto-rotate board in local mode so current player's pieces are at bottom
-    if (m_netMode == NetworkMode::Local) {
+    // Auto-rotate board in local pass-and-play mode (not AI mode)
+    if (m_netMode == NetworkMode::Local && m_aiDifficulty == AIDifficulty::None) {
         m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
         m_boardGrid.setCursor(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row));
         updateBoardHighlights();
@@ -415,9 +439,18 @@ void ChessScene::undoLastMove() {
     if (m_netMode == NetworkMode::Online) return; // Disabled in network mode
     if (m_historyCount == 0) return;
     if (m_uiState == UIState::PromotionPending) return;
+    if (m_aiThinking) return;
 
-    m_historyCount--;
-    m_board.unmakeMove(m_history[m_historyCount]);
+    // In AI mode, undo 2 moves (AI's move + human's move) to get back to human's turn
+    uint8_t undoCount = 1;
+    if (m_aiDifficulty != AIDifficulty::None && m_historyCount >= 2) {
+        undoCount = 2;
+    }
+
+    for (uint8_t u = 0; u < undoCount && m_historyCount > 0; u++) {
+        m_historyCount--;
+        m_board.unmakeMove(m_history[m_historyCount]);
+    }
 
     // Update last move markers
     if (m_historyCount > 0) {
@@ -447,16 +480,24 @@ void ChessScene::undoLastMove() {
     deselectPiece();
     updateStatusBar();
 
-    // Update flip for local mode after undo
-    m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
+    // Update flip for local pass-and-play mode after undo (not AI mode)
+    if (m_aiDifficulty == AIDifficulty::None && m_netMode == NetworkMode::Local) {
+        m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
+    }
     updateBoardHighlights();
 }
 
 void ChessScene::updateStatusBar() {
-    // Left: whose turn / online status
-    if (m_netMode == NetworkMode::Online) {
+    // Left: whose turn / online status / AI status
+    if (m_aiThinking) {
+        m_statusBar.setLeft("Thinking...");
+    } else if (m_netMode == NetworkMode::Online) {
         const char* turn = (m_board.sideToMove() == m_localColor)
                           ? "Your turn" : "Waiting...";
+        m_statusBar.setLeft(turn);
+    } else if (m_aiDifficulty != AIDifficulty::None) {
+        const char* turn = (m_board.sideToMove() == m_aiColor)
+                          ? "AI turn" : "Your turn";
         m_statusBar.setLeft(turn);
     } else {
         const char* turn = (m_board.sideToMove() == PieceColor::White) ? "White" : "Black";
@@ -593,6 +634,7 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
     } else {
         m_gameOverModal.addButton("Menu", [this]() {
             m_gameOverModal.hide();
+            if (m_aiDifficulty != AIDifficulty::None) clearAIMode();
             CardGFX::scenes().pop(); // Back to lobby
         });
     }
@@ -740,6 +782,26 @@ void ChessScene::rebuildMoveList() {
     if (m_moveList.itemCount() > 0) {
         m_moveList.scrollToBottom();
     }
+}
+
+// ── AI Mode ──────────────────────────────────────────────────────────
+
+void ChessScene::setAIMode(AIDifficulty difficulty, PieceColor aiColor) {
+    m_aiDifficulty = difficulty;
+    m_aiColor = aiColor;
+    m_aiThinking = false;
+    // Human's pieces at the bottom
+    PieceColor humanColor = opponent(aiColor);
+    m_localColor = humanColor;
+    m_boardFlipped = (humanColor == PieceColor::Black);
+    newGame();
+}
+
+void ChessScene::clearAIMode() {
+    m_aiDifficulty = AIDifficulty::None;
+    m_aiThinking = false;
+    m_boardFlipped = false;
+    newGame();
 }
 
 // ── Network Mode ─────────────────────────────────────────────────────
