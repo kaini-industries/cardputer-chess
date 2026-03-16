@@ -1,5 +1,103 @@
 #include "chess_scene.h"
+#include "chess_rules.h"
 #include <cstdio>
+#include <cstring>
+
+// ── SAN Formatting ───────────────────────────────────────────────────
+// Must be called BEFORE the move is executed on the board.
+
+static void moveToSAN(char* buf, uint8_t bufLen, const Move& move,
+                      ChessBoard& board, bool isCapture) {
+    if (bufLen < 12) { buf[0] = '\0'; return; }
+    uint8_t i = 0;
+
+    // Castling
+    if (move.isCastle) {
+        if (move.to.col > move.from.col) {
+            strncpy(buf, "O-O", bufLen);
+        } else {
+            strncpy(buf, "O-O-O", bufLen);
+        }
+        i = strlen(buf);
+        // Check/checkmate suffix after castling
+        MoveRecord rec = board.makeMove(move);
+        PieceColor side = board.sideToMove();
+        if (ChessRules::isInCheck(board, side)) {
+            MoveList legal;
+            ChessRules::generateLegal(board, legal);
+            buf[i++] = (legal.count == 0) ? '#' : '+';
+        }
+        board.unmakeMove(rec);
+        buf[i] = '\0';
+        return;
+    }
+
+    Piece piece = board.at(move.from.col, move.from.row);
+
+    // Piece letter (omit for pawns)
+    if (piece.type != PieceType::Pawn) {
+        buf[i++] = piece.typeChar();
+
+        // Disambiguation: check if another piece of the same type
+        // can also reach the same destination square
+        MoveList allMoves;
+        ChessRules::generateLegal(board, allMoves);
+        bool sameFile = false, sameRank = false, ambiguous = false;
+        for (uint8_t m = 0; m < allMoves.count; m++) {
+            const Move& other = allMoves.moves[m];
+            if (other.to == move.to && other.from != move.from) {
+                Piece otherPiece = board.at(other.from.col, other.from.row);
+                if (otherPiece.type == piece.type) {
+                    ambiguous = true;
+                    if (other.from.col == move.from.col) sameFile = true;
+                    if (other.from.row == move.from.row) sameRank = true;
+                }
+            }
+        }
+        if (ambiguous) {
+            if (!sameFile) {
+                buf[i++] = move.from.file();
+            } else if (!sameRank) {
+                buf[i++] = move.from.rank();
+            } else {
+                buf[i++] = move.from.file();
+                buf[i++] = move.from.rank();
+            }
+        }
+    } else if (isCapture) {
+        // Pawn captures: prefix with origin file
+        buf[i++] = move.from.file();
+    }
+
+    // Capture marker
+    if (isCapture) {
+        buf[i++] = 'x';
+    }
+
+    // Destination square
+    buf[i++] = move.to.file();
+    buf[i++] = move.to.rank();
+
+    // Promotion
+    if (move.promotion != PieceType::None) {
+        buf[i++] = '=';
+        const char chars[] = " PNBRQK";
+        buf[i++] = chars[static_cast<uint8_t>(move.promotion)];
+    }
+
+    buf[i] = '\0';
+
+    // Check/checkmate suffix
+    MoveRecord rec = board.makeMove(move);
+    PieceColor side = board.sideToMove();
+    if (ChessRules::isInCheck(board, side)) {
+        MoveList legal;
+        ChessRules::generateLegal(board, legal);
+        buf[i++] = (legal.count == 0) ? '#' : '+';
+        buf[i] = '\0';
+    }
+    board.unmakeMove(rec);
+}
 
 // =====================================================================
 // ChessScene Implementation
@@ -228,6 +326,11 @@ void ChessScene::tryMove(uint8_t col, uint8_t boardRow) {
 }
 
 void ChessScene::executeMove(const Move& move) {
+    // Format SAN before the move is applied (needs pre-move board state)
+    bool isCapture = !m_board.at(move.to.col, move.to.row).empty() || move.isEnPassant;
+    char sanBuf[12];
+    moveToSAN(sanBuf, sizeof(sanBuf), move, m_board, isCapture);
+
     // Store history for undo
     if (m_historyCount < MAX_HISTORY) {
         m_history[m_historyCount] = m_board.makeMove(move);
@@ -242,8 +345,7 @@ void ChessScene::executeMove(const Move& move) {
 
     // Update UI
     deselectPiece();
-    bool isCapture = (m_historyCount > 0) && !m_history[m_historyCount - 1].captured.empty();
-    addMoveToList(move, isCapture);
+    addMoveToList(sanBuf);
     updateStatusBar();
     updateBoardHighlights();
 
@@ -334,24 +436,21 @@ void ChessScene::updateBoardHighlights() {
     m_boardGrid.markDirty();
 }
 
-void ChessScene::addMoveToList(const Move& move, bool isCapture) {
-    char moveBuf[12];
-    move.toString(moveBuf, sizeof(moveBuf), isCapture);
-
+void ChessScene::addMoveToList(const char* san) {
     // After the move is executed, sideToMove has already switched.
     // So if it's now black's turn, white just moved (start a new line).
     // If it's now white's turn, black just moved (append to existing line).
     if (m_board.sideToMove() == PieceColor::Black) {
         // White just moved — create new entry
         char line[32];
-        snprintf(line, sizeof(line), "%d. %s", m_board.fullmoveNumber(), moveBuf);
+        snprintf(line, sizeof(line), "%d. %s", m_board.fullmoveNumber(), san);
         m_moveList.addItem(line);
     } else {
         // Black just moved — append to the last entry
         if (m_moveList.itemCount() > 0) {
             char line[32];
             const char* existing = m_moveList.getItem(m_moveList.itemCount() - 1);
-            snprintf(line, sizeof(line), "%s %s", existing, moveBuf);
+            snprintf(line, sizeof(line), "%s %s", existing, san);
             m_moveList.setItem(m_moveList.itemCount() - 1, line);
         }
     }
@@ -539,8 +638,8 @@ void ChessScene::rebuildMoveList() {
     for (uint8_t i = 0; i < m_historyCount; i++) {
         const Move& move = m_history[i].move;
         bool isCapture = !m_history[i].captured.empty();
-        char moveBuf[12];
-        move.toString(moveBuf, sizeof(moveBuf), isCapture);
+        char sanBuf[12];
+        moveToSAN(sanBuf, sizeof(sanBuf), move, tempBoard, isCapture);
 
         tempBoard.makeMove(move);
 
@@ -549,14 +648,14 @@ void ChessScene::rebuildMoveList() {
         if (tempBoard.sideToMove() == PieceColor::Black) {
             // White just moved — new line
             char line[32];
-            snprintf(line, sizeof(line), "%d. %s", tempBoard.fullmoveNumber(), moveBuf);
+            snprintf(line, sizeof(line), "%d. %s", tempBoard.fullmoveNumber(), sanBuf);
             m_moveList.addItem(line);
         } else {
             // Black just moved — append
             if (m_moveList.itemCount() > 0) {
                 char line[32];
                 const char* existing = m_moveList.getItem(m_moveList.itemCount() - 1);
-                snprintf(line, sizeof(line), "%s %s", existing, moveBuf);
+                snprintf(line, sizeof(line), "%s %s", existing, sanBuf);
                 m_moveList.setItem(m_moveList.itemCount() - 1, line);
             }
         }

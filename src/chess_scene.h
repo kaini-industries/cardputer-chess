@@ -77,7 +77,7 @@ private:
     void undoLastMove();
     void updateStatusBar();
     void updateBoardHighlights();
-    void addMoveToList(const Move& move, bool isCapture);
+    void addMoveToList(const char* san);
     void checkGameEnd();
     void showPromotionModal(const Move& baseMove);
     void showGameOverModal(const char* title, const char* message);

@@ -105,32 +105,6 @@ struct Move {
     bool operator==(const Move& o) const {
         return from == o.from && to == o.to && promotion == o.promotion;
     }
-
-    // Format as long algebraic string into buffer (e.g. "e2e4", "e4xd5", "e7e8=Q", "O-O")
-    void toString(char* buf, uint8_t bufLen, bool isCapture = false) const {
-        if (bufLen < 8) { buf[0] = '\0'; return; }
-        if (isCastle) {
-            if (to.col > from.col) {
-                strncpy(buf, "O-O", bufLen);
-            } else {
-                strncpy(buf, "O-O-O", bufLen);
-            }
-            buf[bufLen - 1] = '\0';
-            return;
-        }
-        uint8_t i = 0;
-        buf[i++] = from.file();
-        buf[i++] = from.rank();
-        if (isCapture) buf[i++] = 'x';
-        buf[i++] = to.file();
-        buf[i++] = to.rank();
-        if (promotion != PieceType::None) {
-            buf[i++] = '=';
-            const char chars[] = " PNBRQK";
-            buf[i++] = chars[static_cast<uint8_t>(promotion)];
-        }
-        buf[i] = '\0';
-    }
 };
 
 // Undo record — everything needed to reverse a move
