@@ -248,6 +248,15 @@ void SceneManager::processFrame(uint32_t dt_ms, InputManager& input,
         current->routeInput(event);
     }
 
+    // Re-check active scene — input handlers may have pushed/popped
+    Scene* afterInput = active();
+    if (afterInput != current) {
+        current = afterInput;
+        if (!current) return;
+        fb.fill(theme.bgPrimary);
+        m_lastRendered = current;
+    }
+
     // 3. Draw
     current->drawWidgets(fb, theme);
     current->onDrawOverlay(fb, theme);
