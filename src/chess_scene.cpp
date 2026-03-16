@@ -402,6 +402,13 @@ void ChessScene::executeMove(const Move& move) {
 
     // Check for game end
     checkGameEnd();
+
+    // Auto-rotate board in local mode so current player's pieces are at bottom
+    if (m_netMode == NetworkMode::Local) {
+        m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
+        m_boardGrid.setCursor(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row));
+        updateBoardHighlights();
+    }
 }
 
 void ChessScene::undoLastMove() {
@@ -439,6 +446,9 @@ void ChessScene::undoLastMove() {
     m_uiState = UIState::SelectPiece;
     deselectPiece();
     updateStatusBar();
+
+    // Update flip for local mode after undo
+    m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
     updateBoardHighlights();
 }
 
