@@ -761,6 +761,7 @@ void ChessScene::clearNetworkMode() {
     m_applyingRemoteMove = false;
     m_awaitingAck = false;
     m_disconnectShown = false;
+    newGame();
 }
 
 void ChessScene::sendMove(const Move& move) {
