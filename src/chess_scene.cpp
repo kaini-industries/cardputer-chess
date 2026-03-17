@@ -298,8 +298,12 @@ void ChessScene::newGame() {
 
     m_moveList.clearItems();
     m_boardGrid.clearAllFlags();
-    // Start cursor on own king (e1 for White, e8 for Black)
-    m_boardGrid.setCursor(toGridCol(4), toGridRow(0));
+    // Start cursor on the human's king
+    uint8_t startRow = 0; // e1 (White's king) by default
+    if (m_aiDifficulty != AIDifficulty::None && m_aiColor == PieceColor::White) {
+        startRow = 7; // e8 (Black's king) — human is Black
+    }
+    m_boardGrid.setCursor(toGridCol(4), toGridRow(startRow));
     updateStatusBar();
     m_boardGrid.markDirty();
 
