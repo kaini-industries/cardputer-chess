@@ -185,9 +185,24 @@ void ChessScene::onTick(uint32_t /*dt_ms*/) {
             // Phase 2: run the search
             Move aiMove = ChessAI::findBestMove(m_board, m_aiDifficulty);
             m_aiThinking = false;
+
+            // Validate move before executing (defense-in-depth)
+            MoveList legal;
+            ChessRules::generateLegal(m_board, legal);
+            if (!legal.contains(aiMove)) {
+                // Should never happen — fall back to first legal move
+                if (legal.count > 0) {
+                    aiMove = legal.moves[0];
+                } else {
+                    return; // No legal moves — game should have ended
+                }
+            }
             executeMove(aiMove);
         }
     }
+
+    // Keep cursor coordinate in status bar current
+    updateStatusBar();
 }
 
 bool ChessScene::onInput(const InputEvent& event) {
@@ -509,13 +524,20 @@ void ChessScene::updateStatusBar() {
     snprintf(moveBuf, sizeof(moveBuf), "Move %d", m_board.fullmoveNumber());
     m_statusBar.setCenter(moveBuf);
 
-    // Right: check status
+    // Right: check status or cursor coordinate
     if (m_uiState == UIState::GameOver) {
         // Already set by showGameOverModal
     } else if (ChessRules::isInCheck(m_board, m_board.sideToMove())) {
         m_statusBar.setRight("Check!");
     } else {
-        m_statusBar.setRight("Chess");
+        // Show cursor board coordinate (e.g. "e4")
+        uint8_t bc = toBoardCol(m_boardGrid.cursorCol());
+        uint8_t br = toBoardRow(m_boardGrid.cursorRow());
+        char posBuf[4];
+        posBuf[0] = 'a' + bc;
+        posBuf[1] = '1' + br;
+        posBuf[2] = '\0';
+        m_statusBar.setRight(posBuf);
     }
 }
 
@@ -729,6 +751,23 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
         // Bottom-right corner
         for (int i = 0; i < 3; i++) {
             canvas.drawHLine(cx + cellW - 3 + i, cy + cellH - 1 - i, 3 - i, theme.error);
+        }
+    }
+
+    // ── File/Rank labels (on empty edge cells only) ───────────────
+    if (piece.empty()) {
+        uint16_t labelColor = lightSquare ? theme.gridCellB : theme.gridCellA;
+
+        // File labels (a-h) in bottom-right of bottom row
+        if (gridRow == 7) {
+            char buf[2] = {(char)('a' + boardCol), '\0'};
+            canvas.drawText(cx + cellW - 6, cy + cellH - 8, buf, labelColor, 1);
+        }
+
+        // Rank labels (1-8) in top-left of left column
+        if (col == 0) {
+            char buf[2] = {(char)('1' + boardRow), '\0'};
+            canvas.drawText(cx + 1, cy + 1, buf, labelColor, 1);
         }
     }
 
