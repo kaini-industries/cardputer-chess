@@ -1,31 +1,46 @@
 # Cardputer ADV Chess
 
-A two-player chess game for the M5Stack Cardputer Advance with local pass-and-play and wireless multiplayer via ESP-NOW, built with the [CardGFX](lib/cardgfx/README.md) UI framework.
+A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI opponent, and wireless multiplayer via ESP-NOW. Built with the [CardGFX](lib/cardgfx/README.md) UI framework.
 
 ## Features
 
 - Full chess rules: castling, en passant, pawn promotion, check/checkmate/stalemate detection
 - 50-move rule and insufficient material draw detection
-- Wireless multiplayer over ESP-NOW (no WiFi network required)
-- Local pass-and-play with automatic board rotation per turn
+- Three game modes: local pass-and-play, vs AI, and wireless multiplayer
 - AI opponent with three difficulty levels (Easy, Medium, Hard)
+- Wireless multiplayer over ESP-NOW (no WiFi network required)
 - Animated piece movement between turns
 - Move history panel with standard algebraic notation (SAN)
-- Undo support (local mode)
+- Undo support (local and AI modes)
+- Resign support (online mode)
 - Status bar showing current turn, move number, and check/game-over indicators
 
-## Multiplayer
+## Game Modes
 
-On launch, a lobby screen presents three options:
+On launch, a lobby screen presents four options:
 
 | Mode | Description |
 |------|-------------|
 | **Local** | Pass-and-play on a single device. The board auto-rotates after each move so the current player's pieces are always at the bottom. |
-| **vs AI** | Play against the computer. Choose difficulty (Easy/Medium/Hard) and your color. |
+| **vs AI** | Play against the computer. Choose difficulty (Easy, Medium, or Hard) and your color (White or Black). |
 | **Host** | Broadcast a game over ESP-NOW and wait for an opponent to join. Host plays White. |
 | **Join** | Scan for a nearby host and connect. Joiner plays Black. |
 
+## AI Opponent
+
+| Difficulty | Search Depth | Time Limit | Notes |
+|------------|-------------|------------|-------|
+| **Easy** | 2 | 200ms | 30% chance to pick a random legal move |
+| **Medium** | 4 | 1s | Standard play |
+| **Hard** | 6+ | 3s | Iterative deepening for maximum depth within time |
+
+The AI uses alpha-beta pruning with move ordering (captures scored by MVV-LVA, promotions prioritized) and quiescence search to avoid the horizon effect. Positional evaluation uses piece-square tables.
+
+## Wireless Multiplayer
+
 ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network setup needed. Both devices just need to be within WiFi range (~30m indoors). Pairing times out after 60 seconds.
+
+The host broadcasts a discovery message every 500ms. When a joiner connects, both devices exchange handshake messages and the game begins. Moves are sent with sequence numbers and acknowledged to ensure reliable delivery.
 
 ## Controls
 
@@ -39,8 +54,9 @@ ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network 
 | **/** or **FN + /** | Move cursor right |
 | **Enter** or **Space** | Select piece / confirm move |
 | **Esc** (side button) | Deselect piece / cancel |
-| **U** | Undo last move |
-| **N** | Return to lobby (with confirmation) |
+| **U** | Undo last move (local/AI only) |
+| **N** | Return to lobby with confirmation (local/AI only) |
+| **R** | Resign with confirmation (online only) |
 
 > The Cardputer has no hardware arrow keys. The `;` `,` `.` `/` keys are mapped to arrows at the framework level, so they work as directional controls in all scenes.
 
@@ -54,14 +70,7 @@ ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network 
 
 ### Promotion
 
-When a pawn reaches the back rank, a dialog appears with four buttons:
-
-- **Queen** -- promote to queen
-- **Knight** -- promote to knight
-- **Rook** -- promote to rook
-- **Bishop** -- promote to bishop
-
-Use **,** **/** (left/right) to navigate between buttons, **Enter** to confirm.
+When a pawn reaches the back rank, a dialog appears with four choices: Queen, Knight, Rook, Bishop. Use **,** **/** to navigate, **Enter** to confirm.
 
 ### Game Over
 
@@ -79,14 +88,7 @@ When checkmate, stalemate, 50-move rule, or insufficient material is detected, a
 
 ### Build from Source
 
-## Building
-
-### Prerequisites
-
-- [PlatformIO](https://platformio.org/) (CLI or VSCode extension)
-- M5Stack Cardputer Advance
-
-### Build & Upload
+**Prerequisites:** [PlatformIO](https://platformio.org/) (CLI or VSCode extension) and an M5Stack Cardputer Advance.
 
 ```bash
 # Build
@@ -99,25 +101,44 @@ pio run --target upload
 pio device monitor
 ```
 
+The build automatically generates a merged M5Burner-compatible binary at `firmware/cardputer-chess-<version>.bin`.
+
+## Testing
+
+The project includes a CardGFX framework test suite that runs on-device:
+
+```bash
+# Build and upload tests
+pio run -e test-cardputer --target upload
+
+# View results on serial monitor
+pio device monitor
+```
+
+Tests cover focus management, widget rendering, scene lifecycle, and widget functionality. After automated tests complete, interactive visual diagnostics are available (press **N**/**P** to navigate, **Esc** to exit).
+
 ## Project Structure
 
 ```
 .
 ├── src/
-│   ├── main.cpp              # Entry point
-│   ├── lobby_scene.h/.cpp    # Pre-game lobby (mode select, ESP-NOW pairing)
-│   ├── chess_scene.h/.cpp    # Game UI scene (board, widgets, input)
-│   ├── chess_types.h         # Piece, Square, Move data types
-│   ├── chess_board.h/.cpp    # Board state, make/unmake move
-│   ├── chess_rules.h/.cpp    # Move generation, check detection
-│   ├── chess_ai.h/.cpp       # AI opponent (alpha-beta with iterative deepening)
-│   ├── chess_net_protocol.h  # Network message types and protocol
+│   ├── main.cpp                # Entry point
+│   ├── lobby_scene.h/.cpp      # Pre-game lobby (mode select, ESP-NOW pairing)
+│   ├── chess_scene.h/.cpp      # Game UI (board, widgets, input, animation)
+│   ├── chess_types.h           # Piece, Square, Move data types
+│   ├── chess_board.h/.cpp      # Board state, make/unmake move
+│   ├── chess_rules.h/.cpp      # Move generation, check detection
+│   ├── chess_ai.h/.cpp         # AI opponent (alpha-beta with iterative deepening)
+│   ├── chess_net_protocol.h    # Network message types and protocol
 │   └── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
 ├── lib/
-│   └── cardgfx/              # CardGFX UI framework (see its README)
+│   ├── cardgfx/                # CardGFX UI framework (see its README)
+│   └── cardgfx_test/           # CardGFX test suite
+├── test/
+│   └── test_main.cpp           # Test runner entry point
 ├── firmware/                   # M5Burner merged binaries (build artifact)
-├── generate_m5burner_bin.py   # Post-build script for M5Burner binary
-├── platformio.ini             # Build configuration
+├── generate_m5burner_bin.py    # Post-build script for M5Burner binary
+├── platformio.ini              # Build configuration
 └── README.md
 ```
 
