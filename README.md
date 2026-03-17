@@ -8,6 +8,8 @@ A two-player chess game for the M5Stack Cardputer Advance with local pass-and-pl
 - 50-move rule and insufficient material draw detection
 - Wireless multiplayer over ESP-NOW (no WiFi network required)
 - Local pass-and-play with automatic board rotation per turn
+- AI opponent with three difficulty levels (Easy, Medium, Hard)
+- Animated piece movement between turns
 - Move history panel with standard algebraic notation (SAN)
 - Undo support (local mode)
 - Status bar showing current turn, move number, and check/game-over indicators
@@ -19,6 +21,7 @@ On launch, a lobby screen presents three options:
 | Mode | Description |
 |------|-------------|
 | **Local** | Pass-and-play on a single device. The board auto-rotates after each move so the current player's pieces are always at the bottom. |
+| **vs AI** | Play against the computer. Choose difficulty (Easy/Medium/Hard) and your color. |
 | **Host** | Broadcast a game over ESP-NOW and wait for an opponent to join. Host plays White. |
 | **Join** | Scan for a nearby host and connect. Joiner plays Black. |
 
@@ -67,6 +70,15 @@ When checkmate, stalemate, 50-move rule, or insufficient material is detected, a
 - **New Game** -- return to the lobby
 - **View** -- dismiss the dialog and review the position (press **U** to undo moves)
 
+## Installation
+
+### M5 Burner (easiest)
+
+1. Open [M5Burner](https://docs.m5stack.com/en/download) and filter by **Cardputer**
+2. Find **Cardputer ADV Chess** and click **Burn**
+
+### Build from Source
+
 ## Building
 
 ### Prerequisites
@@ -98,10 +110,13 @@ pio device monitor
 │   ├── chess_types.h         # Piece, Square, Move data types
 │   ├── chess_board.h/.cpp    # Board state, make/unmake move
 │   ├── chess_rules.h/.cpp    # Move generation, check detection
+│   ├── chess_ai.h/.cpp       # AI opponent (alpha-beta with iterative deepening)
 │   ├── chess_net_protocol.h  # Network message types and protocol
 │   └── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
 ├── lib/
 │   └── cardgfx/              # CardGFX UI framework (see its README)
+├── firmware/                   # M5Burner merged binaries (build artifact)
+├── generate_m5burner_bin.py   # Post-build script for M5Burner binary
 ├── platformio.ini             # Build configuration
 └── README.md
 ```
