@@ -201,8 +201,10 @@ void ChessScene::onTick(uint32_t /*dt_ms*/) {
         }
     }
 
-    // Keep cursor coordinate in status bar current
-    updateStatusBar();
+    // Keep cursor coordinate in status bar current (skip when modal visible)
+    if (!m_promotionModal.isVisible() && !m_gameOverModal.isVisible()) {
+        updateStatusBar();
+    }
 }
 
 bool ChessScene::onInput(const InputEvent& event) {
