@@ -60,6 +60,19 @@ private:
     // Pending promotion
     Move m_pendingPromotion;
 
+    // ── Move Animation ────────────────────────────────────────
+    struct MoveAnim {
+        bool active = false;
+        uint32_t elapsed = 0;
+        static constexpr uint32_t DURATION_MS = 250;
+        Piece piece;
+        bool isCapture = false;
+        bool pendingFlip = false;  // Deferred board flip (local pass-and-play)
+        int16_t fromPx, fromPy;   // Pre-computed grid pixel positions
+        int16_t toPx, toPy;
+    };
+    MoveAnim m_moveAnim;
+
     // ── AI Mode ────────────────────────────────────────────────
     AIDifficulty m_aiDifficulty = AIDifficulty::None;
     PieceColor   m_aiColor = PieceColor::Black;

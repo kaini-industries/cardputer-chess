@@ -165,7 +165,23 @@ void ChessScene::onEnter() {
     focusChain().focusWidget(&m_boardGrid);
 }
 
-void ChessScene::onTick(uint32_t /*dt_ms*/) {
+void ChessScene::onTick(uint32_t dt_ms) {
+    // ── Move animation tick ──────────────────────────────────────
+    if (m_moveAnim.active) {
+        m_moveAnim.elapsed += dt_ms;
+        if (m_moveAnim.elapsed >= MoveAnim::DURATION_MS) {
+            m_moveAnim.active = false;
+            // Apply deferred board flip (local pass-and-play)
+            if (m_moveAnim.pendingFlip) {
+                m_moveAnim.pendingFlip = false;
+                m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
+                m_boardGrid.setCursor(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row));
+                updateBoardHighlights();
+            }
+        }
+        m_boardGrid.markDirty();  // Force redraw every frame during animation
+    }
+
     if (m_netMode == NetworkMode::Online) {
         pollNetwork();
     }
@@ -173,7 +189,9 @@ void ChessScene::onTick(uint32_t /*dt_ms*/) {
     // AI turn: two-phase approach so "Thinking..." renders before search blocks.
     // Phase 1: set thinking flag → status bar updates → frame renders.
     // Phase 2 (next tick): run search → execute move.
+    // Skip while move animation is playing.
     if (m_aiDifficulty != AIDifficulty::None &&
+        !m_moveAnim.active &&
         m_uiState == UIState::SelectPiece &&
         m_board.sideToMove() == m_aiColor) {
 
@@ -209,6 +227,9 @@ void ChessScene::onTick(uint32_t /*dt_ms*/) {
 
 bool ChessScene::onInput(const InputEvent& event) {
     if (!event.isDown()) return false;
+
+    // Block input during move animation
+    if (m_moveAnim.active) return true;
 
     // If a modal is visible, let it handle input
     if (m_promotionModal.isVisible() || m_gameOverModal.isVisible()) {
@@ -422,6 +443,20 @@ void ChessScene::executeMove(const Move& move) {
     char sanBuf[12];
     moveToSAN(sanBuf, sizeof(sanBuf), move, m_board, isCapture);
 
+    // Set up slide animation (must capture positions before board flip)
+    m_moveAnim.piece = m_board.at(move.from.col, move.from.row);
+    // For promotions, show the promoted piece sliding
+    if (move.promotion != PieceType::None) {
+        m_moveAnim.piece.type = move.promotion;
+    }
+    m_moveAnim.isCapture = isCapture;
+    m_moveAnim.fromPx = toGridCol(move.from.col) * 15;
+    m_moveAnim.fromPy = toGridRow(move.from.row) * 15;
+    m_moveAnim.toPx = toGridCol(move.to.col) * 15;
+    m_moveAnim.toPy = toGridRow(move.to.row) * 15;
+    m_moveAnim.elapsed = 0;
+    m_moveAnim.active = true;
+
     // Store history for undo
     if (m_historyCount < MAX_HISTORY) {
         m_history[m_historyCount] = m_board.makeMove(move);
@@ -448,11 +483,9 @@ void ChessScene::executeMove(const Move& move) {
     // Check for game end
     checkGameEnd();
 
-    // Auto-rotate board in local pass-and-play mode (not AI mode)
+    // Delay board flip until animation completes (flip would break animation coords)
     if (m_netMode == NetworkMode::Local && m_aiDifficulty == AIDifficulty::None) {
-        m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
-        m_boardGrid.setCursor(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row));
-        updateBoardHighlights();
+        m_moveAnim.pendingFlip = true;
     }
 }
 
@@ -685,6 +718,11 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     uint8_t boardCol = self->toBoardCol(col);
     uint8_t boardRow = self->toBoardRow(gridRow);
 
+    // ── Animation state for this cell ────────────────────────────
+    const auto& anim = self->m_moveAnim;
+    bool isAnimFrom = anim.active && cx == anim.fromPx && cy == anim.fromPy;
+    bool isAnimTo   = anim.active && cx == anim.toPx   && cy == anim.toPy;
+
     // ── Cell background ───────────────────────────────────────────
     bool lightSquare = ((boardCol + boardRow) % 2 != 0);
     uint16_t cellBg = lightSquare ? theme.gridCellA : theme.gridCellB;
@@ -692,6 +730,14 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     if (state.marked)    cellBg = theme.accentMuted;
     if (state.highlight) cellBg = theme.gridHighlight;
     if (state.selected)  cellBg = theme.accentActive;
+
+    // Capture flash: tint destination red early in animation
+    if (isAnimTo && anim.isCapture) {
+        float t = (float)anim.elapsed / MoveAnim::DURATION_MS;
+        if (t < 0.3f) {
+            cellBg = theme.error;
+        }
+    }
 
     canvas.fillRect(cx, cy, cellW, cellH, cellBg);
 
@@ -704,8 +750,9 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
         canvas.fillCircle(dotCx, dotCy, 2, theme.bgPrimary);
     }
 
-    // ── Piece rendering ───────────────────────────────────────────
-    if (!piece.empty()) {
+    // ── Piece rendering (skip if this cell is part of slide animation) ──
+    bool skipPiece = isAnimFrom || isAnimTo;
+    if (!piece.empty() && !skipPiece) {
         char ch = piece.typeChar();
 
         // Center the character in the cell (scale 2 = 10x14 in a 15x15 cell)
@@ -785,6 +832,43 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
         if (cellW > 4 && cellH > 4) {
             canvas.drawRect(cx + 1, cy + 1, cellW - 2, cellH - 2, theme.gridCursor);
         }
+    }
+
+    // ── Sliding piece overlay (drawn on last cell so it's on top) ─
+    if (col == 7 && gridRow == 7 && anim.active) {
+        float t = (float)anim.elapsed / MoveAnim::DURATION_MS;
+        if (t > 1.0f) t = 1.0f;
+        // Ease-out quadratic: decelerates into destination
+        float eased = 1.0f - (1.0f - t) * (1.0f - t);
+
+        int16_t ax = anim.fromPx + (int16_t)((anim.toPx - anim.fromPx) * eased);
+        int16_t ay = anim.fromPy + (int16_t)((anim.toPy - anim.fromPy) * eased);
+
+        // Draw the sliding piece centered in the interpolated cell position
+        Piece ap = anim.piece;
+        char ach = ap.typeChar();
+        uint8_t ascale = 2;
+        uint16_t acharW = FONT_CHAR_W * ascale;
+        uint16_t acharH = FONT_CHAR_H * ascale;
+        int16_t apx = ax + (cellW - acharW) / 2;
+        int16_t apy = ay + (cellH - acharH) / 2;
+        if (apy < ay + 1) apy = ay + 1;
+
+        uint16_t aFill, aOutline;
+        if (ap.color == PieceColor::White) {
+            aFill = HAL::rgb565(255, 255, 255);
+            aOutline = HAL::rgb565(0, 0, 0);
+        } else {
+            aFill = HAL::rgb565(30, 30, 30);
+            aOutline = HAL::rgb565(200, 200, 200);
+        }
+
+        char atxt[2] = {ach, '\0'};
+        canvas.drawText(apx - 1, apy, atxt, aOutline, ascale);
+        canvas.drawText(apx + 1, apy, atxt, aOutline, ascale);
+        canvas.drawText(apx, apy - 1, atxt, aOutline, ascale);
+        canvas.drawText(apx, apy + 1, atxt, aOutline, ascale);
+        canvas.drawText(apx, apy, atxt, aFill, ascale);
     }
 }
 
