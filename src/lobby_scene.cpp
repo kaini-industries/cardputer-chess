@@ -59,7 +59,9 @@ void LobbyScene::showMenu() {
     m_titleLabel.setVisible(true);
 
     m_menuModal.clearButtons();
-    m_menuModal.setTitle("Chess");
+    char titleBuf[32];
+    snprintf(titleBuf, sizeof(titleBuf), "Chess v%s", FIRMWARE_VERSION);
+    m_menuModal.setTitle(titleBuf);
     m_menuModal.setMessage("Choose mode:");
 
     m_menuModal.addButton("Local", [this]() {

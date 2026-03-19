@@ -116,6 +116,7 @@ bool Scene::routeInput(const InputEvent& event) {
         case '.': mapped.key = Key::DOWN;  mapped.character = 0; break;
         case ',': mapped.key = Key::LEFT;  mapped.character = 0; break;
         case '/': mapped.key = Key::RIGHT; mapped.character = 0; break;
+        case '`': case '~': mapped.key = Key::ESCAPE; mapped.character = 0; break;
         }
     }
 

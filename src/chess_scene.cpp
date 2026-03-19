@@ -180,6 +180,9 @@ void ChessScene::onTick(uint32_t dt_ms) {
             }
         }
         m_boardGrid.markDirty();  // Force redraw every frame during animation
+        if (m_gameOverModal.isVisible()) {
+            m_gameOverModal.markDirty();
+        }
     }
 
     if (m_netMode == NetworkMode::Online) {
