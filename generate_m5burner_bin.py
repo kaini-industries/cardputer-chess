@@ -7,6 +7,13 @@ Post-build script: produces two release binaries after `pio run -e m5stack-cores
 Import("env")
 
 import os
+import sys
+
+# Add PlatformIO's esptool package to Python path
+esptool_pkg = env.PioPlatform().get_package_dir("tool-esptoolpy")
+if esptool_pkg and esptool_pkg not in sys.path:
+    sys.path.insert(0, esptool_pkg)
+
 import esptool
 
 
