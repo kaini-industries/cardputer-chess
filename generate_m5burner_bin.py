@@ -1,8 +1,8 @@
 """
-Post-build script: merge bootloader + partitions + firmware into a single
-.bin suitable for M5Burner's "User Custom" upload.
+Post-build script: produces two release binaries after `pio run -e m5stack-cores3`:
 
-Runs automatically after `pio run -e m5stack-cores3`.
+  firmware/cardputer-chess-<ver>-m5-burner.bin  — merged (M5Burner, flash at 0x0)
+  firmware/cardputer-chess-<ver>-app.bin        — app only (launcher/manual, flash at 0x10000)
 """
 Import("env")
 
@@ -22,7 +22,7 @@ def merge_bin(source, target, env):
 
     out_dir = os.path.join(env.subst("$PROJECT_DIR"), "firmware")
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{fw_name}-{fw_version}.bin")
+    out_path = os.path.join(out_dir, f"{fw_name}-{fw_version}-m5-burner.bin")
 
     print(f"Merging into M5Burner binary: {out_path}")
 
@@ -46,6 +46,13 @@ def merge_bin(source, target, env):
 
     size_kb = os.path.getsize(out_path) / 1024
     print(f"M5Burner binary ready: {out_path} ({size_kb:.0f} KB)")
+
+    # Copy app-only binary for launcher/manual flashing (offset 0x10000)
+    import shutil
+    app_path = os.path.join(out_dir, f"{fw_name}-{fw_version}-app.bin")
+    shutil.copy2(firmware, app_path)
+    app_kb = os.path.getsize(app_path) / 1024
+    print(f"App-only binary ready: {app_path} ({app_kb:.0f} KB)")
 
 
 env.AddPostAction("$BUILD_DIR/firmware.bin", merge_bin)
