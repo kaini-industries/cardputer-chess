@@ -45,13 +45,18 @@ public:
     void setHalfmoveClock(uint8_t c) { m_halfmoveClock = c; }
     void setFullmoveNumber(uint16_t n) { m_fullmoveNumber = n; }
 
+    // Variant
+    ChessVariant variant() const { return m_variant; }
+    void setVariant(ChessVariant v) { m_variant = v; }
+
 private:
-    Piece      m_board[8][8];       // [row][col]
-    PieceColor m_sideToMove;
-    uint8_t    m_castleRights;      // 4-bit mask
-    Square     m_enPassantTarget;   // NO_SQUARE if none
-    uint8_t    m_halfmoveClock;
-    uint16_t   m_fullmoveNumber;
+    Piece        m_board[8][8];       // [row][col]
+    PieceColor   m_sideToMove;
+    uint8_t      m_castleRights;      // 4-bit mask
+    Square       m_enPassantTarget;   // NO_SQUARE if none
+    uint8_t      m_halfmoveClock;
+    uint16_t     m_fullmoveNumber;
+    ChessVariant m_variant = ChessVariant::Standard;
 };
 
 #endif // CHESS_BOARD_H

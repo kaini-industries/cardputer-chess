@@ -100,8 +100,11 @@ static void addPawnMoves(const ChessBoard& board, uint8_t col, uint8_t row,
     uint8_t startRow = (color == PieceColor::White) ? 1 : 6;
     uint8_t promoRow = (color == PieceColor::White) ? 7 : 0;
 
-    auto addWithPromo = [&](Square from, Square to, bool isEP = false) {
-        if (to.row == promoRow) {
+    bool isAtomic = board.variant() == ChessVariant::Atomic;
+
+    auto addWithPromo = [&](Square from, Square to, bool isEP = false, bool isCapture = false) {
+        // In atomic, capture-promotions are suppressed (pawn explodes before promoting)
+        if (to.row == promoRow && !(isAtomic && isCapture)) {
             // Generate all 4 promotion options
             PieceType promos[] = {PieceType::Queen, PieceType::Rook,
                                   PieceType::Bishop, PieceType::Knight};
@@ -148,13 +151,13 @@ static void addPawnMoves(const ChessBoard& board, uint8_t col, uint8_t row,
         Square toSq = makeSquare(nc, newRow);
 
         if (!target.empty() && target.color != color) {
-            addWithPromo(from, toSq);
+            addWithPromo(from, toSq, false, true);
         }
 
         // En passant
         Square ep = board.enPassantTarget();
         if (!isNoSquare(ep) && ep.col == nc && ep.row == (uint8_t)newRow) {
-            addWithPromo(from, toSq, true);
+            addWithPromo(from, toSq, true, true);
         }
     }
 }
@@ -211,17 +214,28 @@ static void addKingMoves(const ChessBoard& board, uint8_t col, uint8_t row,
     Square from = makeSquare(col, row);
 
     // Normal king moves
+    bool isAtomic = board.variant() == ChessVariant::Atomic;
     for (int i = 0; i < 8; i++) {
         int8_t nc = (int8_t)col + KING_OFFS[i][0];
         int8_t nr = (int8_t)row + KING_OFFS[i][1];
         if (nc < 0 || nc >= 8 || nr < 0 || nr >= 8) continue;
 
         Piece target = board.at(nc, nr);
-        if (target.empty() || target.color != color) {
-            Move m;
-            m.from = from;
-            m.to = makeSquare(nc, nr);
-            out.add(m);
+        // In atomic chess, kings cannot capture (would self-destruct)
+        if (isAtomic) {
+            if (target.empty()) {
+                Move m;
+                m.from = from;
+                m.to = makeSquare(nc, nr);
+                out.add(m);
+            }
+        } else {
+            if (target.empty() || target.color != color) {
+                Move m;
+                m.from = from;
+                m.to = makeSquare(nc, nr);
+                out.add(m);
+            }
         }
     }
 
@@ -311,12 +325,26 @@ void generateLegal(ChessBoard& board, MoveList& out) {
     generatePseudoLegal(board, pseudo);
 
     PieceColor side = board.sideToMove();
+    bool isAtomic = board.variant() == ChessVariant::Atomic;
 
     for (uint8_t i = 0; i < pseudo.count; i++) {
         MoveRecord rec = board.makeMove(pseudo.moves[i]);
-        // After making the move, side has switched. Check if our king is safe.
-        if (!isInCheck(board, side)) {
-            out.add(pseudo.moves[i]);
+        if (isAtomic) {
+            bool enemyKingGone = isNoSquare(board.findKing(opponent(side)));
+            bool ownKingGone = isNoSquare(board.findKing(side));
+            if (enemyKingGone) {
+                // Legal: wins by exploding enemy king (overrides self-check)
+                out.add(pseudo.moves[i]);
+            } else if (!ownKingGone && !isInCheck(board, side)) {
+                // Legal: own king survives and is not in check
+                out.add(pseudo.moves[i]);
+            }
+            // Else: blew up own king without blowing up theirs, or left in check
+        } else {
+            // Standard: own king must not be in check
+            if (!isInCheck(board, side)) {
+                out.add(pseudo.moves[i]);
+            }
         }
         board.unmakeMove(rec);
     }
@@ -356,6 +384,9 @@ bool isDraw50Move(const ChessBoard& board) {
 }
 
 bool isInsufficientMaterial(const ChessBoard& board) {
+    // Atomic: insufficient material doesn't apply (even a pawn can win)
+    if (board.variant() == ChessVariant::Atomic) return false;
+
     uint8_t whiteKnights = 0, whiteBishops = 0;
     uint8_t blackKnights = 0, blackBishops = 0;
     uint8_t otherPieces = 0;
@@ -387,6 +418,10 @@ bool isInsufficientMaterial(const ChessBoard& board) {
     if (totalMinor == 1) return true;
 
     return false;
+}
+
+bool isKingExploded(const ChessBoard& board, PieceColor c) {
+    return isNoSquare(board.findKing(c));
 }
 
 } // namespace ChessRules

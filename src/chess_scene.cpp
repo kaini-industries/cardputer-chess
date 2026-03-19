@@ -314,10 +314,12 @@ bool ChessScene::onInput(const InputEvent& event) {
 
 void ChessScene::newGame() {
     m_board.reset();
+    m_board.setVariant(m_variant);
     m_uiState = UIState::SelectPiece;
     m_selectedSquare = NO_SQUARE;
     m_lastFrom = NO_SQUARE;
     m_lastTo = NO_SQUARE;
+    m_lastMoveWasExplosion = false;
     m_historyCount = 0;
     m_historyOverflow = false;
     m_legalMoves.clear();
@@ -448,17 +450,27 @@ void ChessScene::executeMove(const Move& move) {
     char sanBuf[12];
     moveToSAN(sanBuf, sizeof(sanBuf), move, m_board, isCapture);
 
-    // Set up slide animation (must capture positions before board flip)
+    // Set up move animation
+    bool isAtomicCapture = (m_variant == ChessVariant::Atomic && isCapture);
     m_moveAnim.piece = m_board.at(move.from.col, move.from.row);
     // For promotions, show the promoted piece sliding
     if (move.promotion != PieceType::None) {
         m_moveAnim.piece.type = move.promotion;
     }
     m_moveAnim.isCapture = isCapture;
-    m_moveAnim.fromPx = toGridCol(move.from.col) * 15;
-    m_moveAnim.fromPy = toGridRow(move.from.row) * 15;
-    m_moveAnim.toPx = toGridCol(move.to.col) * 15;
-    m_moveAnim.toPy = toGridRow(move.to.row) * 15;
+    if (isAtomicCapture) {
+        // Atomic captures: no slide, just explosion flash centered on TO
+        m_moveAnim.fromPx = toGridCol(move.to.col) * 15;
+        m_moveAnim.fromPy = toGridRow(move.to.row) * 15;
+        m_moveAnim.toPx = m_moveAnim.fromPx;
+        m_moveAnim.toPy = m_moveAnim.fromPy;
+    } else {
+        // Standard: slide from FROM to TO
+        m_moveAnim.fromPx = toGridCol(move.from.col) * 15;
+        m_moveAnim.fromPy = toGridRow(move.from.row) * 15;
+        m_moveAnim.toPx = toGridCol(move.to.col) * 15;
+        m_moveAnim.toPy = toGridRow(move.to.row) * 15;
+    }
     m_moveAnim.elapsed = 0;
     m_moveAnim.active = true;
 
@@ -474,6 +486,7 @@ void ChessScene::executeMove(const Move& move) {
     // Track last move for highlighting
     m_lastFrom = move.from;
     m_lastTo = move.to;
+    m_lastMoveWasExplosion = (m_variant == ChessVariant::Atomic && isCapture);
 
     // Send move to remote player (only if this was a local move)
     if (m_netMode == NetworkMode::Online && !m_applyingRemoteMove) {
@@ -573,14 +586,16 @@ void ChessScene::updateStatusBar() {
         m_statusBar.setLeft(turn);
     }
 
-    // Center: move number + 50-move clock
-    char moveBuf[24];
+    // Center: move number + variant indicator + 50-move clock
+    char moveBuf[32];
+    const char* varTag = (m_variant == ChessVariant::Atomic) ? " [A]" : "";
     uint8_t fiftyClock = m_board.halfmoveClock() / 2;
     if (fiftyClock > 0) {
-        snprintf(moveBuf, sizeof(moveBuf), "Move %d  50m:%d",
-                 m_board.fullmoveNumber(), fiftyClock);
+        snprintf(moveBuf, sizeof(moveBuf), "Move %d%s 50m:%d",
+                 m_board.fullmoveNumber(), varTag, fiftyClock);
     } else {
-        snprintf(moveBuf, sizeof(moveBuf), "Move %d", m_board.fullmoveNumber());
+        snprintf(moveBuf, sizeof(moveBuf), "Move %d%s",
+                 m_board.fullmoveNumber(), varTag);
     }
     m_statusBar.setCenter(moveBuf);
 
@@ -650,6 +665,20 @@ void ChessScene::addMoveToList(const char* san) {
 }
 
 void ChessScene::checkGameEnd() {
+    // Atomic: check for king explosion
+    if (m_variant == ChessVariant::Atomic) {
+        if (ChessRules::isKingExploded(m_board, PieceColor::White)) {
+            m_statusBar.setRight("Boom!");
+            showGameOverModal("Exploded!", "Black wins!");
+            return;
+        }
+        if (ChessRules::isKingExploded(m_board, PieceColor::Black)) {
+            m_statusBar.setRight("Boom!");
+            showGameOverModal("Exploded!", "White wins!");
+            return;
+        }
+    }
+
     if (ChessRules::isCheckmate(m_board)) {
         const char* winner = (m_board.sideToMove() == PieceColor::White)
                             ? "Black wins!" : "White wins!";
@@ -753,10 +782,18 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     if (state.highlight) cellBg = theme.gridHighlight;
     if (state.selected)  cellBg = theme.accentActive;
 
-    // Capture flash: tint destination red early in animation
-    if (isAnimTo && anim.isCapture) {
+    // Capture flash
+    if (anim.active && anim.isCapture) {
         float t = (float)anim.elapsed / MoveAnim::DURATION_MS;
-        if (t < 0.3f) {
+        if (self->m_lastMoveWasExplosion) {
+            // Atomic explosion: flash entire 3x3 area around capture square
+            int8_t dc = (int8_t)col - (int8_t)(anim.toPx / 15);
+            int8_t dr = (int8_t)gridRow - (int8_t)(anim.toPy / 15);
+            if (dc >= -1 && dc <= 1 && dr >= -1 && dr <= 1 && t < 0.5f) {
+                cellBg = theme.error;
+            }
+        } else if (isAnimTo && t < 0.3f) {
+            // Standard capture: tint destination red
             cellBg = theme.error;
         }
     }
@@ -944,7 +981,8 @@ void ChessScene::saveGameState() {
     ChessStorage::saveGame(m_board, m_history, m_historyCount,
                            m_historyOverflow,
                            m_aiDifficulty, m_aiColor,
-                           m_localColor, m_boardFlipped);
+                           m_localColor, m_boardFlipped,
+                           m_variant);
 }
 
 bool ChessScene::loadSavedGame() {
@@ -953,13 +991,16 @@ bool ChessScene::loadSavedGame() {
     bool flipped;
     uint8_t histCount;
     bool histOverflow;
+    ChessVariant variant;
 
     if (!ChessStorage::loadGame(m_board, m_history, histCount, histOverflow,
-                                aiDiff, aiCol, localCol, flipped)) {
+                                aiDiff, aiCol, localCol, flipped, variant)) {
         return false;
     }
 
     // Restore mode state
+    m_variant = variant;
+    m_board.setVariant(variant);
     m_aiDifficulty = aiDiff;
     m_aiColor = aiCol;
     m_aiThinking = false;
@@ -1007,6 +1048,13 @@ bool ChessScene::loadSavedGame() {
 
     m_boardGrid.markDirty();
     return true;
+}
+
+// ── Variant ──────────────────────────────────────────────────────────
+
+void ChessScene::setVariant(ChessVariant v) {
+    m_variant = v;
+    m_board.setVariant(v);
 }
 
 // ── AI Mode ──────────────────────────────────────────────────────────

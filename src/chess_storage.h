@@ -17,14 +17,16 @@ namespace ChessStorage {
                   const MoveRecord* history, uint8_t historyCount,
                   bool historyOverflow,
                   AIDifficulty aiDifficulty, PieceColor aiColor,
-                  PieceColor localColor, bool boardFlipped);
+                  PieceColor localColor, bool boardFlipped,
+                  ChessVariant variant);
 
     // Load a previously saved game. Returns true if a valid save was found.
     bool loadGame(ChessBoard& board,
                   MoveRecord* history, uint8_t& historyCount,
                   bool& historyOverflow,
                   AIDifficulty& aiDifficulty, PieceColor& aiColor,
-                  PieceColor& localColor, bool& boardFlipped);
+                  PieceColor& localColor, bool& boardFlipped,
+                  ChessVariant& variant);
 
     // Check if a saved game exists.
     bool hasSave();

@@ -82,12 +82,14 @@ void LobbyScene::showMenu() {
     m_menuModal.addButton("Local", [this]() {
         m_menuModal.hide();
         ChessStorage::clearSave();
-        startLocalGame();
+        m_pendingMode = PendingMode::Local;
+        showVariantMenu();
     });
     m_menuModal.addButton("vs AI", [this]() {
         m_menuModal.hide();
         ChessStorage::clearSave();
-        showAIDifficultyMenu();
+        m_pendingMode = PendingMode::AI;
+        showVariantMenu();
     });
     m_menuModal.addButton("Host", [this]() {
         m_menuModal.hide();
@@ -102,6 +104,40 @@ void LobbyScene::showMenu() {
 
     m_menuModal.show();
     focusChain().focusWidget(&m_menuModal);
+}
+
+void LobbyScene::showVariantMenu() {
+    m_state = LobbyState::VariantSelect;
+    m_statusBar.setLeft("Variant");
+    m_statusBar.setRight("ESC=Back");
+    m_titleLabel.setVisible(false);
+
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Variant");
+    m_menuModal.setMessage("Choose variant:");
+
+    m_menuModal.addButton("Standard", [this]() {
+        m_selectedVariant = ChessVariant::Standard;
+        m_menuModal.hide();
+        onVariantSelected();
+    });
+    m_menuModal.addButton("Atomic", [this]() {
+        m_selectedVariant = ChessVariant::Atomic;
+        m_menuModal.hide();
+        onVariantSelected();
+    });
+
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+}
+
+void LobbyScene::onVariantSelected() {
+    m_chessScene->setVariant(m_selectedVariant);
+    if (m_pendingMode == PendingMode::Local) {
+        startLocalGame();
+    } else {
+        showAIDifficultyMenu();
+    }
 }
 
 void LobbyScene::startLocalGame() {
@@ -319,9 +355,14 @@ bool LobbyScene::onInput(const InputEvent& event) {
             cancelPairing();
             return true;
         }
-        if (m_state == LobbyState::AIDifficulty) {
+        if (m_state == LobbyState::VariantSelect) {
             m_menuModal.hide();
             showMenu();
+            return true;
+        }
+        if (m_state == LobbyState::AIDifficulty) {
+            m_menuModal.hide();
+            showVariantMenu();
             return true;
         }
         if (m_state == LobbyState::AIColor) {

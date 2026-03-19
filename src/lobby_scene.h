@@ -2,6 +2,7 @@
 #define LOBBY_SCENE_H
 
 #include <cardgfx.h>
+#include "chess_types.h"
 #include "chess_ai.h"
 #include "chess_net_protocol.h"
 
@@ -29,6 +30,7 @@ private:
     // ── State Machine ────────────────────────────────────────────
     enum class LobbyState : uint8_t {
         Menu,           // Showing mode selection
+        VariantSelect,  // Choosing Standard vs Atomic
         AIDifficulty,   // Choosing AI difficulty
         AIColor,        // Choosing player color vs AI
         Hosting,        // Broadcasting, waiting for joiner
@@ -38,6 +40,11 @@ private:
 
     LobbyState m_state = LobbyState::Menu;
     ChessScene* m_chessScene = nullptr;
+
+    // ── Variant / Mode State ──────────────────────────────────────
+    ChessVariant m_selectedVariant = ChessVariant::Standard;
+    enum class PendingMode : uint8_t { Local, AI };
+    PendingMode m_pendingMode = PendingMode::Local;
 
     // ── AI State ────────────────────────────────────────────────
     AIDifficulty m_selectedDifficulty = AIDifficulty::None;
@@ -57,6 +64,8 @@ private:
 
     // ── Methods ──────────────────────────────────────────────────
     void showMenu();
+    void showVariantMenu();
+    void onVariantSelected();
     void showAIDifficultyMenu();
     void showAIColorMenu();
     void startAIGame(PieceColor aiColor);

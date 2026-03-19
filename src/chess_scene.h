@@ -52,6 +52,7 @@ private:
     // Last move (for marked squares)
     Square m_lastFrom = NO_SQUARE;
     Square m_lastTo   = NO_SQUARE;
+    bool   m_lastMoveWasExplosion = false; // Atomic: last move caused explosion
 
     // Move history (for undo)
     static constexpr uint8_t MAX_HISTORY = 250;
@@ -74,6 +75,9 @@ private:
         int16_t toPx, toPy;
     };
     MoveAnim m_moveAnim;
+
+    // ── Game Variant ──────────────────────────────────────────
+    ChessVariant m_variant = ChessVariant::Standard;
 
     // ── AI Mode ────────────────────────────────────────────────
     AIDifficulty m_aiDifficulty = AIDifficulty::None;
@@ -145,6 +149,9 @@ private:
     }
 
 public:
+    // Called by LobbyScene to set the game variant
+    void setVariant(ChessVariant v);
+
     // Called by LobbyScene to configure AI mode before pushing
     void setAIMode(AIDifficulty difficulty, PieceColor aiColor);
     void clearAIMode();
