@@ -33,7 +33,7 @@ def merge_bin(source, target, env):
     subprocess.check_call([
         env.subst("$PYTHONEXE"), esptool_py,
         "--chip", "esp32s3",
-        "merge-bin",
+        "merge_bin",
         "--flash-mode", "dio",
         "--flash-size", "16MB",
         "-o", out_path,
