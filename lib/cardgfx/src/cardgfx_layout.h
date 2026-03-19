@@ -31,7 +31,11 @@ struct Bounds {
     uint16_t w = 0;
     uint16_t h = 0;
 
-    Rect toRect() const { return {x, y, w, h}; }
+    Bounds() = default;
+    Bounds(int16_t x, int16_t y, uint16_t w, uint16_t h)
+        : x(x), y(y), w(w), h(h) {}
+
+    Rect toRect() const { return Rect(x, y, w, h); }
 };
 
 // ── Layout Helpers ───────────────────────────────────────────────

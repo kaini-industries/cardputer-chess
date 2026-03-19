@@ -15,6 +15,10 @@ struct Rect {
     uint16_t w = 0;
     uint16_t h = 0;
 
+    Rect() = default;
+    Rect(int16_t x, int16_t y, uint16_t w, uint16_t h)
+        : x(x), y(y), w(w), h(h) {}
+
     bool empty() const { return w == 0 || h == 0; }
 
     bool contains(int16_t px, int16_t py) const {
