@@ -4,6 +4,10 @@ on:
   release:
     types: [created, edited]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to upload artifacts to (e.g. v0.13.0)'
+        required: true
 
 jobs:
   build:
@@ -28,6 +32,7 @@ jobs:
       - name: Upload firmware to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.event.release.tag_name }}
           files: |
             firmware/cardputer-chess-*.bin
             bin/m5stack-cores3/firmware.bin
