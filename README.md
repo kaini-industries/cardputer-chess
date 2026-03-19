@@ -11,13 +11,18 @@ A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI
 - Wireless multiplayer over ESP-NOW (no WiFi network required)
 - Animated piece movement between turns
 - Move history panel with standard algebraic notation (SAN)
+- Persistent game saving — games auto-save after each move and survive power cycles
 - Undo support (local and AI modes)
 - Resign support (online mode)
 - Status bar showing current turn, move number, and check/game-over indicators
 
 ## Game Modes
 
-On launch, a lobby screen presents four options:
+On launch, a lobby screen presents the available options. If a saved game exists, a **Resume** button appears at the top of the menu.
+
+| Mode | Description |
+|------|-------------|
+| **Resume** | Continue a previously saved game (only shown when a save exists). |
 
 | Mode | Description |
 |------|-------------|
@@ -25,6 +30,8 @@ On launch, a lobby screen presents four options:
 | **vs AI** | Play against the computer. Choose difficulty (Easy, Medium, or Hard) and your color (White or Black). |
 | **Host** | Broadcast a game over ESP-NOW and wait for an opponent to join. Host plays White. |
 | **Join** | Scan for a nearby host and connect. Joiner plays Black. |
+
+Starting a new game (Local, vs AI, Host, or Join) clears any existing save. Network games are not saved since the connection cannot survive a power cycle.
 
 ## AI Opponent
 
@@ -129,6 +136,7 @@ Tests cover focus management, widget rendering, scene lifecycle, and widget func
 │   ├── chess_board.h/.cpp      # Board state, make/unmake move
 │   ├── chess_rules.h/.cpp      # Move generation, check detection
 │   ├── chess_ai.h/.cpp         # AI opponent (alpha-beta with iterative deepening)
+│   ├── chess_storage.h/.cpp    # Persistent game save/load (ESP32 NVS)
 │   ├── chess_net_protocol.h    # Network message types and protocol
 │   └── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
 ├── lib/
