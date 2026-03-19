@@ -16,7 +16,7 @@ namespace CardGFX {
  */
 class List : public Widget {
 public:
-    static constexpr uint8_t  MAX_ITEMS      = 64;
+    static constexpr uint8_t  MAX_ITEMS      = 192;
     static constexpr uint8_t  MAX_ITEM_LEN   = 32;
 
     using SelectCallback = std::function<void(uint8_t index, const char* text)>;

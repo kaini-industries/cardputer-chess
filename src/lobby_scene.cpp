@@ -55,7 +55,7 @@ void LobbyScene::showMenu() {
     m_state = LobbyState::Menu;
     m_statusLabel.setText("");
     m_statusBar.setLeft("Chess");
-    m_statusBar.setRight("");
+    m_statusBar.setRight("v" FIRMWARE_VERSION);
     m_titleLabel.setVisible(true);
 
     m_menuModal.clearButtons();

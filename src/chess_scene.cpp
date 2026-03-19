@@ -561,9 +561,15 @@ void ChessScene::updateStatusBar() {
         m_statusBar.setLeft(turn);
     }
 
-    // Center: move number
-    char moveBuf[16];
-    snprintf(moveBuf, sizeof(moveBuf), "Move %d", m_board.fullmoveNumber());
+    // Center: move number + 50-move clock
+    char moveBuf[24];
+    uint8_t fiftyClock = m_board.halfmoveClock() / 2;
+    if (fiftyClock > 0) {
+        snprintf(moveBuf, sizeof(moveBuf), "Move %d  50m:%d",
+                 m_board.fullmoveNumber(), fiftyClock);
+    } else {
+        snprintf(moveBuf, sizeof(moveBuf), "Move %d", m_board.fullmoveNumber());
+    }
     m_statusBar.setCenter(moveBuf);
 
     // Right: check status or cursor coordinate
