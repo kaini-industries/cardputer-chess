@@ -24,4 +24,6 @@ jobs:
       - name: Upload firmware to release
         uses: softprops/action-gh-release@v2
         with:
-          files: firmware/cardputer-chess-*.bin
+          files: |
+            firmware/cardputer-chess-*.bin
+            .pio/build/m5stack-cores3/firmware.bin

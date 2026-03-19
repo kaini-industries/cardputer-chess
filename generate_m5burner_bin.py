@@ -7,8 +7,7 @@ Post-build script: produces two release binaries after `pio run -e m5stack-cores
 Import("env")
 
 import os
-import sys
-import subprocess
+import esptool
 
 
 def merge_bin(source, target, env):
@@ -26,23 +25,16 @@ def merge_bin(source, target, env):
 
     print(f"Merging into M5Burner binary: {out_path}")
 
-    # PlatformIO's SCons runs under its own virtualenv where esptool is installed.
-    # Use the current interpreter (not sys.executable, which may point to Homebrew).
-    python = env.subst("$PYTHONEXE") or sys.executable
-
-    subprocess.check_call(
-        [
-            python, "-m", "esptool",
-            "--chip", "esp32s3",
-            "merge-bin",
-            "--flash-mode", "dio",
-            "--flash-size", "16MB",
-            "-o", out_path,
-            "0x0000", bootloader,
-            "0x8000", partitions,
-            "0x10000", firmware,
-        ]
-    )
+    esptool.main([
+        "--chip", "esp32s3",
+        "merge-bin",
+        "--flash-mode", "dio",
+        "--flash-size", "16MB",
+        "-o", out_path,
+        "0x0000", bootloader,
+        "0x8000", partitions,
+        "0x10000", firmware,
+    ])
 
     size_kb = os.path.getsize(out_path) / 1024
     print(f"M5Burner binary ready: {out_path} ({size_kb:.0f} KB)")
