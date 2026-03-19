@@ -258,6 +258,7 @@ bool ChessScene::onInput(const InputEvent& event) {
         m_gameOverModal.clearButtons();
         m_gameOverModal.addButton("Yes", [this]() {
             m_gameOverModal.hide();
+            ChessStorage::clearSave();
             if (m_aiDifficulty != AIDifficulty::None) clearAIMode();
             CardGFX::scenes().pop(); // Back to lobby
         });
@@ -965,6 +966,12 @@ bool ChessScene::loadSavedGame() {
     m_localColor = localCol;
     m_boardFlipped = flipped;
     m_netMode = NetworkMode::Local;
+
+    // For local pass-and-play, recalculate flip from sideToMove
+    // (saveGameState runs before the pending animation flip completes)
+    if (m_aiDifficulty == AIDifficulty::None) {
+        m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
+    }
     m_historyCount = histCount;
     m_historyOverflow = histOverflow;
 
