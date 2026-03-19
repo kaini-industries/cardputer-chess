@@ -21,9 +21,12 @@ jobs:
       - name: Build firmware
         run: pio run -e m5stack-cores3
 
+      - name: Stage raw firmware
+        run: mkdir -p bin/m5stack-cores3 && cp .pio/build/m5stack-cores3/firmware.bin bin/m5stack-cores3/firmware.bin
+
       - name: Upload firmware to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             firmware/cardputer-chess-*.bin
-            .pio/build/m5stack-cores3/firmware.bin
+            bin/m5stack-cores3/firmware.bin
