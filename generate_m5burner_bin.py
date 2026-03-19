@@ -7,14 +7,8 @@ Post-build script: produces two release binaries after `pio run -e m5stack-cores
 Import("env")
 
 import os
-import sys
-
-# Add PlatformIO's esptool package to Python path
-esptool_pkg = env.PioPlatform().get_package_dir("tool-esptoolpy")
-if esptool_pkg and esptool_pkg not in sys.path:
-    sys.path.insert(0, esptool_pkg)
-
-import esptool
+import subprocess
+import shutil
 
 
 def merge_bin(source, target, env):
@@ -32,7 +26,12 @@ def merge_bin(source, target, env):
 
     print(f"Merging into M5Burner binary: {out_path}")
 
-    esptool.main([
+    # Find esptool from PlatformIO's tool package
+    esptool_pkg = env.PioPlatform().get_package_dir("tool-esptoolpy")
+    esptool_py = os.path.join(esptool_pkg, "esptool.py")
+
+    subprocess.check_call([
+        env.subst("$PYTHONEXE"), esptool_py,
         "--chip", "esp32s3",
         "merge-bin",
         "--flash-mode", "dio",
@@ -47,7 +46,6 @@ def merge_bin(source, target, env):
     print(f"M5Burner binary ready: {out_path} ({size_kb:.0f} KB)")
 
     # Copy app-only binary for launcher/manual flashing (offset 0x10000)
-    import shutil
     app_path = os.path.join(out_dir, f"{fw_name}-{fw_version}-app.bin")
     shutil.copy2(firmware, app_path)
     app_kb = os.path.getsize(app_path) / 1024
