@@ -38,6 +38,13 @@ public:
     // Find the king's position for a given color
     Square findKing(PieceColor c) const;
 
+    // Setters for loading saved state
+    void setSideToMove(PieceColor c) { m_sideToMove = c; }
+    void setCastleRights(uint8_t r) { m_castleRights = r; }
+    void setEnPassantTarget(Square s) { m_enPassantTarget = s; }
+    void setHalfmoveClock(uint8_t c) { m_halfmoveClock = c; }
+    void setFullmoveNumber(uint16_t n) { m_fullmoveNumber = n; }
+
 private:
     Piece      m_board[8][8];       // [row][col]
     PieceColor m_sideToMove;

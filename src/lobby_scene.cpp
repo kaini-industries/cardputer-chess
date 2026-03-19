@@ -1,5 +1,6 @@
 #include "lobby_scene.h"
 #include "chess_scene.h"
+#include "chess_storage.h"
 #include "esp_now_transport.h"
 #include <Arduino.h>
 #include <esp_random.h>
@@ -64,20 +65,38 @@ void LobbyScene::showMenu() {
     m_menuModal.setTitle(titleBuf);
     m_menuModal.setMessage("Choose mode:");
 
+    // Show Resume button if a saved game exists
+    if (ChessStorage::hasSave()) {
+        m_menuModal.addButton("Resume", [this]() {
+            m_menuModal.hide();
+            if (m_chessScene->loadSavedGame()) {
+                CardGFX::scenes().push(m_chessScene);
+            } else {
+                // Save was corrupted — clear it and stay in menu
+                ChessStorage::clearSave();
+                showMenu();
+            }
+        });
+    }
+
     m_menuModal.addButton("Local", [this]() {
         m_menuModal.hide();
+        ChessStorage::clearSave();
         startLocalGame();
     });
     m_menuModal.addButton("vs AI", [this]() {
         m_menuModal.hide();
+        ChessStorage::clearSave();
         showAIDifficultyMenu();
     });
     m_menuModal.addButton("Host", [this]() {
         m_menuModal.hide();
+        ChessStorage::clearSave();
         startHosting();
     });
     m_menuModal.addButton("Join", [this]() {
         m_menuModal.hide();
+        ChessStorage::clearSave();
         startJoining();
     });
 

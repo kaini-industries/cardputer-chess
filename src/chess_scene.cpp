@@ -488,6 +488,11 @@ void ChessScene::executeMove(const Move& move) {
     // Check for game end
     checkGameEnd();
 
+    // Save after each move (checkGameEnd clears save on game over)
+    if (m_uiState != UIState::GameOver) {
+        saveGameState();
+    }
+
     // Delay board flip until animation completes (flip would break animation coords)
     if (m_netMode == NetworkMode::Local && m_aiDifficulty == AIDifficulty::None) {
         m_moveAnim.pendingFlip = true;
@@ -545,6 +550,9 @@ void ChessScene::undoLastMove() {
         m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
     }
     updateBoardHighlights();
+
+    // Re-save state after undo
+    saveGameState();
 }
 
 void ChessScene::updateStatusBar() {
@@ -693,6 +701,7 @@ void ChessScene::showPromotionModal(const Move& baseMove) {
 
 void ChessScene::showGameOverModal(const char* title, const char* message) {
     m_uiState = UIState::GameOver;
+    ChessStorage::clearSave();
 
     m_gameOverModal.clearButtons();
     m_gameOverModal.setTitle(title);
@@ -923,6 +932,74 @@ void ChessScene::rebuildMoveList() {
     if (m_moveList.itemCount() > 0) {
         m_moveList.scrollToBottom();
     }
+}
+
+// ── Persistence ──────────────────────────────────────────────────────
+
+void ChessScene::saveGameState() {
+    // Don't save network games (connection can't survive power cycle)
+    if (m_netMode == NetworkMode::Online) return;
+
+    ChessStorage::saveGame(m_board, m_history, m_historyCount,
+                           m_historyOverflow,
+                           m_aiDifficulty, m_aiColor,
+                           m_localColor, m_boardFlipped);
+}
+
+bool ChessScene::loadSavedGame() {
+    AIDifficulty aiDiff;
+    PieceColor aiCol, localCol;
+    bool flipped;
+    uint8_t histCount;
+    bool histOverflow;
+
+    if (!ChessStorage::loadGame(m_board, m_history, histCount, histOverflow,
+                                aiDiff, aiCol, localCol, flipped)) {
+        return false;
+    }
+
+    // Restore mode state
+    m_aiDifficulty = aiDiff;
+    m_aiColor = aiCol;
+    m_aiThinking = false;
+    m_localColor = localCol;
+    m_boardFlipped = flipped;
+    m_netMode = NetworkMode::Local;
+    m_historyCount = histCount;
+    m_historyOverflow = histOverflow;
+
+    // Restore UI state
+    m_uiState = UIState::SelectPiece;
+    m_selectedSquare = NO_SQUARE;
+    m_legalMoves.clear();
+
+    // Restore last-move markers from final history entry
+    if (m_historyCount > 0) {
+        m_lastFrom = m_history[m_historyCount - 1].move.from;
+        m_lastTo = m_history[m_historyCount - 1].move.to;
+    } else {
+        m_lastFrom = NO_SQUARE;
+        m_lastTo = NO_SQUARE;
+    }
+
+    // Rebuild the move list display
+    rebuildMoveList();
+    updateBoardHighlights();
+    updateStatusBar();
+
+    // Update hint bar for mode
+    m_hintBar.setText("[U]ndo [N]ew");
+
+    // Position cursor on the last move destination or king
+    if (!isNoSquare(m_lastTo)) {
+        m_boardGrid.setCursor(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row));
+    } else {
+        uint8_t kingRow = (m_board.sideToMove() == PieceColor::White) ? 0 : 7;
+        m_boardGrid.setCursor(toGridCol(4), toGridRow(kingRow));
+    }
+
+    m_boardGrid.markDirty();
+    return true;
 }
 
 // ── AI Mode ──────────────────────────────────────────────────────────

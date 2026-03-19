@@ -6,6 +6,7 @@
 #include "chess_rules.h"
 #include "chess_ai.h"
 #include "chess_net_protocol.h"
+#include "chess_storage.h"
 
 using namespace CardGFX;
 
@@ -119,6 +120,9 @@ private:
     void showGameOverModal(const char* title, const char* message);
     void rebuildMoveList();
 
+    // Persistence
+    void saveGameState();
+
     // Network methods
     void pollNetwork();
     void sendMove(const Move& move);
@@ -148,6 +152,9 @@ public:
     // Called by LobbyScene to configure network mode before pushing
     void setNetworkMode(PieceColor localColor);
     void clearNetworkMode();
+
+    // Called by LobbyScene to resume a saved game
+    bool loadSavedGame();
 
     // Cell renderer -- draws pieces and highlights on the board
     static void renderCell(Canvas& canvas, uint8_t col, uint8_t row,
