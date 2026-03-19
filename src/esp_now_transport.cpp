@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <esp_idf_version.h>
 #include <cstring>
 
 // =====================================================================
@@ -20,9 +21,15 @@ EspNowTransport& EspNowTransport::instance() {
 
 // ── ESP-NOW Callbacks (static, forward to singleton) ─────────────────
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
 static void onRecvCb(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
     EspNowTransport::instance()._onReceive(info->src_addr, data, len);
 }
+#else
+static void onRecvCb(const uint8_t* mac, const uint8_t* data, int len) {
+    EspNowTransport::instance()._onReceive(mac, data, len);
+}
+#endif
 
 // ── Lifecycle ────────────────────────────────────────────────────────
 
