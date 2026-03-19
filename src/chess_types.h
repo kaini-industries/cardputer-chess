@@ -32,6 +32,9 @@ struct Piece {
     PieceType  type  = PieceType::None;
     PieceColor color = PieceColor::White;
 
+    Piece() = default;
+    Piece(PieceType t, PieceColor c) : type(t), color(c) {}
+
     bool empty() const { return type == PieceType::None; }
 
     bool operator==(const Piece& o) const {
@@ -62,6 +65,9 @@ struct Square {
     uint8_t col = 0; // 0-7 (a-h)
     uint8_t row = 0; // 0-7 (rank 1-8, row 0 = rank 1 = white's back rank)
 
+    Square() = default;
+    constexpr Square(uint8_t c, uint8_t r) : col(c), row(r) {}
+
     bool operator==(const Square& o) const { return col == o.col && row == o.row; }
     bool operator!=(const Square& o) const { return !(*this == o); }
 
@@ -78,7 +84,7 @@ inline Square makeSquare(uint8_t col, uint8_t row) {
 }
 
 // Sentinel value for "no square"
-static constexpr Square NO_SQUARE = {0xFF, 0xFF};
+static constexpr Square NO_SQUARE = Square(0xFF, 0xFF);
 
 inline bool isNoSquare(const Square& s) {
     return s.col == 0xFF;

@@ -75,8 +75,8 @@ struct ResignMsg {
 
 inline Move netMsgToMove(const MoveNetMsg& msg) {
     Move m;
-    m.from = {msg.fromCol, msg.fromRow};
-    m.to = {msg.toCol, msg.toRow};
+    m.from = Square(msg.fromCol, msg.fromRow);
+    m.to = Square(msg.toCol, msg.toRow);
     m.promotion = static_cast<PieceType>(msg.promotion);
     m.isCastle = (msg.flags & 0x01) != 0;
     m.isEnPassant = (msg.flags & 0x02) != 0;
