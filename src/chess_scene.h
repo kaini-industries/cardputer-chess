@@ -53,9 +53,10 @@ private:
     Square m_lastTo   = NO_SQUARE;
 
     // Move history (for undo)
-    static constexpr uint8_t MAX_HISTORY = 64;
+    static constexpr uint8_t MAX_HISTORY = 200;
     MoveRecord m_history[MAX_HISTORY];
     uint8_t    m_historyCount = 0;
+    bool       m_historyOverflow = false;
 
     // Pending promotion
     Move m_pendingPromotion;

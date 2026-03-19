@@ -315,6 +315,7 @@ void ChessScene::newGame() {
     m_lastFrom = NO_SQUARE;
     m_lastTo = NO_SQUARE;
     m_historyCount = 0;
+    m_historyOverflow = false;
     m_legalMoves.clear();
 
     m_moveList.clearItems();
@@ -462,7 +463,8 @@ void ChessScene::executeMove(const Move& move) {
         m_history[m_historyCount] = m_board.makeMove(move);
         m_historyCount++;
     } else {
-        m_board.makeMove(move); // Can't undo if history is full
+        m_board.makeMove(move);
+        m_historyOverflow = true; // Can no longer undo safely
     }
 
     // Track last move for highlighting
@@ -492,6 +494,7 @@ void ChessScene::executeMove(const Move& move) {
 void ChessScene::undoLastMove() {
     if (m_netMode == NetworkMode::Online) return; // Disabled in network mode
     if (m_historyCount == 0) return;
+    if (m_historyOverflow) return;
     if (m_uiState == UIState::PromotionPending) return;
     if (m_aiThinking) return;
 
