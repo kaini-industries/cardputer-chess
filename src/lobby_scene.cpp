@@ -63,6 +63,7 @@ void LobbyScene::showMenu() {
     m_titleLabel.setVisible(true);
 
     m_menuModal.clearButtons();
+    m_menuModal.setEscapeCallback([](){});  // No back at top level
     char titleBuf[32];
     snprintf(titleBuf, sizeof(titleBuf), "Chess v%s", FIRMWARE_VERSION);
     m_menuModal.setTitle(titleBuf);
@@ -115,7 +116,7 @@ void LobbyScene::showMenu() {
 void LobbyScene::showVariantMenu() {
     m_state = LobbyState::VariantSelect;
     m_statusBar.setLeft("Variant");
-    m_statusBar.setRight("ESC=Back");
+    m_statusBar.setRight("");
     m_titleLabel.setVisible(false);
 
     m_menuModal.clearButtons();
@@ -140,6 +141,10 @@ void LobbyScene::showVariantMenu() {
         m_menuModal.hide();
         onVariantSelected();
     });
+    m_menuModal.addButton("Back", [this]() {
+        m_menuModal.hide();
+        showMenu();
+    });
 
     m_menuModal.show();
     focusChain().focusWidget(&m_menuModal);
@@ -152,7 +157,7 @@ void LobbyScene::onVariantSelected() {
 void LobbyScene::showTimeControlMenu() {
     m_state = LobbyState::TimeSelect;
     m_statusBar.setLeft("Time");
-    m_statusBar.setRight("ESC=Back");
+    m_statusBar.setRight("");
 
     m_menuModal.clearButtons();
     m_menuModal.setTitle("Time Control");
@@ -182,6 +187,10 @@ void LobbyScene::showTimeControlMenu() {
         m_selectedTimeControl = TimeControl::Rapid10;
         m_menuModal.hide();
         onTimeSelected();
+    });
+    m_menuModal.addButton("Back", [this]() {
+        m_menuModal.hide();
+        showVariantMenu();
     });
 
     m_menuModal.show();
@@ -213,7 +222,7 @@ void LobbyScene::startLocalGame() {
 void LobbyScene::showAIDifficultyMenu() {
     m_state = LobbyState::AIDifficulty;
     m_statusBar.setLeft("vs AI");
-    m_statusBar.setRight("ESC=Back");
+    m_statusBar.setRight("");
     m_titleLabel.setVisible(false);
 
     m_menuModal.clearButtons();
@@ -235,6 +244,10 @@ void LobbyScene::showAIDifficultyMenu() {
         m_menuModal.hide();
         showAIColorMenu();
     });
+    m_menuModal.addButton("Back", [this]() {
+        m_menuModal.hide();
+        showTimeControlMenu();
+    });
 
     m_menuModal.show();
     focusChain().focusWidget(&m_menuModal);
@@ -254,6 +267,10 @@ void LobbyScene::showAIColorMenu() {
     m_menuModal.addButton("Black", [this]() {
         m_menuModal.hide();
         startAIGame(PieceColor::White);
+    });
+    m_menuModal.addButton("Back", [this]() {
+        m_menuModal.hide();
+        showAIDifficultyMenu();
     });
 
     m_menuModal.show();
@@ -421,7 +438,7 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
 void LobbyScene::showPuzzleMenu() {
     m_state = LobbyState::PuzzleCategory;
     m_statusBar.setLeft("Puzzles");
-    m_statusBar.setRight("ESC=Back");
+    m_statusBar.setRight("");
     m_titleLabel.setVisible(false);
 
     PuzzleProgress progress;
@@ -473,6 +490,10 @@ void LobbyScene::showPuzzleMenu() {
         uint16_t idx = puzzleIndexByType(PuzzleType::Tactic, 0);
         if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
     });
+    m_menuModal.addButton("Back", [this]() {
+        m_menuModal.hide();
+        showMenu();
+    });
 
     m_menuModal.show();
     focusChain().focusWidget(&m_menuModal);
@@ -491,31 +512,6 @@ bool LobbyScene::onInput(const InputEvent& event) {
     if (event.key == Key::ESCAPE) {
         if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining) {
             cancelPairing();
-            return true;
-        }
-        if (m_state == LobbyState::VariantSelect) {
-            m_menuModal.hide();
-            showMenu();
-            return true;
-        }
-        if (m_state == LobbyState::TimeSelect) {
-            m_menuModal.hide();
-            showVariantMenu();
-            return true;
-        }
-        if (m_state == LobbyState::AIDifficulty) {
-            m_menuModal.hide();
-            showTimeControlMenu();
-            return true;
-        }
-        if (m_state == LobbyState::AIColor) {
-            m_menuModal.hide();
-            showAIDifficultyMenu();
-            return true;
-        }
-        if (m_state == LobbyState::PuzzleCategory) {
-            m_menuModal.hide();
-            showMenu();
             return true;
         }
     }

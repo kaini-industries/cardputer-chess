@@ -8,7 +8,7 @@
 namespace CardGFX {
 
 /**
- * Modal: a centered overlay dialog with title, message, and up to 4 buttons.
+ * Modal: a centered overlay dialog with title, message, and up to 8 buttons.
  *
  * Designed to be pushed as a scene overlay. The Modal handles its own
  * focus between buttons and calls the appropriate callback on selection.
@@ -22,7 +22,7 @@ namespace CardGFX {
  */
 class Modal : public Widget {
 public:
-    static constexpr uint8_t MAX_BUTTONS    = 4;
+    static constexpr uint8_t MAX_BUTTONS    = 8;
     static constexpr uint8_t MAX_TITLE_LEN  = 24;
     static constexpr uint8_t MAX_MSG_LEN    = 80;
     static constexpr uint8_t MAX_BTN_LEN    = 12;
@@ -48,6 +48,11 @@ public:
         markDirty();
     }
 
+    void setEscapeCallback(ButtonCallback cb) {
+        m_escapeCallback = cb;
+        m_hasEscapeCallback = (cb != nullptr);
+    }
+
     bool addButton(const char* label, ButtonCallback cb) {
         if (m_buttonCount >= MAX_BUTTONS) return false;
         strncpy(m_buttons[m_buttonCount].label, label, MAX_BTN_LEN - 1);
@@ -61,6 +66,8 @@ public:
     void clearButtons() {
         m_buttonCount = 0;
         m_selectedButton = 0;
+        m_escapeCallback = nullptr;
+        m_hasEscapeCallback = false;
         markDirty();
     }
 
@@ -85,11 +92,24 @@ public:
 
         if (m_bounds.w < 20 || m_bounds.h < 14) return;
 
-        // Dialog box
+        uint8_t scale = theme.fontScaleMd;
+        uint16_t lineH = FONT_CHAR_H * scale;
+
+        // Compute content height to auto-size dialog
+        uint16_t contentH = 6; // top + bottom padding (3 each)
+        if (m_title[0])   contentH += lineH + 4; // title + gap + divider
+        if (m_message[0]) contentH += lineH + 2; // message + gap
+        if (m_buttonCount > 0) {
+            uint16_t btnH = lineH + 4;
+            uint16_t btnGap = 2;
+            contentH += m_buttonCount * btnH + (m_buttonCount - 1) * btnGap;
+        }
+
         uint16_t dw = m_bounds.w - 16;
-        uint16_t dh = m_bounds.h - 10;
+        uint16_t maxDh = m_bounds.h - 10;
+        uint16_t dh = contentH < maxDh ? contentH : maxDh;
         int16_t  dx = 8;
-        int16_t  dy = 5;
+        int16_t  dy = (m_bounds.h - dh) / 2; // Center vertically
 
         // Shadow
         canvas.fillRect(dx + 2, dy + 2, dw, dh, theme.border);
@@ -97,54 +117,47 @@ public:
         canvas.fillRect(dx, dy, dw, dh, theme.bgSecondary);
         canvas.drawRect(dx, dy, dw, dh, theme.borderFocus);
 
-        uint8_t scale = theme.fontScaleMd;
         int16_t textX = dx + 4;
         int16_t textY = dy + 3;
 
         // Title
         if (m_title[0]) {
             canvas.drawText(textX, textY, m_title, theme.accent, scale);
-            textY += FONT_CHAR_H * scale + 4;
+            textY += lineH + 4;
             canvas.drawHLine(dx + 2, textY - 2, dw - 4, theme.divider);
         }
 
         // Message
         if (m_message[0]) {
             canvas.drawText(textX, textY, m_message, theme.fgPrimary, scale);
-            textY += FONT_CHAR_H * scale + 2;
+            textY += lineH + 2;
         }
 
-        // Buttons
+        // Buttons (vertical layout)
         if (m_buttonCount > 0) {
-            textY = dy + dh - FONT_CHAR_H * scale - 8;
-            uint16_t btnSpacing = 4;
-            uint16_t totalBtnW = 0;
-
-            // Measure total button width
-            for (uint8_t i = 0; i < m_buttonCount; i++) {
-                totalBtnW += canvas.textWidth(m_buttons[i].label, scale) + 8;
-            }
-            totalBtnW += (m_buttonCount - 1) * btnSpacing;
-
-            int16_t btnX = dx + (dw - totalBtnW) / 2;
+            uint16_t btnH = lineH + 4;
+            uint16_t btnGap = 2;
+            uint16_t btnW = dw - 16;
+            int16_t btnX = dx + 8;
+            int16_t dialogBottom = dy + dh;
 
             for (uint8_t i = 0; i < m_buttonCount; i++) {
-                uint16_t btnW = canvas.textWidth(m_buttons[i].label, scale) + 8;
-                uint16_t btnH = FONT_CHAR_H * scale + 4;
+                int16_t btnY = textY + i * (btnH + btnGap);
+                if (btnY + btnH > dialogBottom) break; // Overflow guard
 
                 if (i == m_selectedButton) {
-                    canvas.fillRect(btnX, textY, btnW, btnH, theme.accent);
-                    canvas.drawText(btnX + 4, textY + 2,
+                    canvas.fillRect(btnX, btnY, btnW, btnH, theme.accent);
+                    int16_t tw = canvas.textWidth(m_buttons[i].label, scale);
+                    canvas.drawText(btnX + (btnW - tw) / 2, btnY + 2,
                                     m_buttons[i].label,
                                     theme.bgPrimary, scale);
                 } else {
-                    canvas.drawRect(btnX, textY, btnW, btnH, theme.border);
-                    canvas.drawText(btnX + 4, textY + 2,
+                    canvas.drawRect(btnX, btnY, btnW, btnH, theme.border);
+                    int16_t tw = canvas.textWidth(m_buttons[i].label, scale);
+                    canvas.drawText(btnX + (btnW - tw) / 2, btnY + 2,
                                     m_buttons[i].label,
                                     theme.fgPrimary, scale);
                 }
-
-                btnX += btnW + btnSpacing;
             }
         }
     }
@@ -154,9 +167,11 @@ public:
 
         switch (event.key) {
         case Key::LEFT:
+        case Key::UP:
             if (m_selectedButton > 0) { m_selectedButton--; markDirty(); }
             return true;
         case Key::RIGHT:
+        case Key::DOWN:
             if (m_selectedButton < m_buttonCount - 1) {
                 m_selectedButton++; markDirty();
             }
@@ -169,9 +184,10 @@ public:
             }
             return true;
         case Key::ESCAPE:
-            // Escape = last button (usually "Cancel")
-            if (m_buttonCount > 0 &&
-                m_buttons[m_buttonCount - 1].callback) {
+            if (m_hasEscapeCallback) {
+                m_escapeCallback();
+            } else if (m_buttonCount > 0 &&
+                       m_buttons[m_buttonCount - 1].callback) {
                 m_buttons[m_buttonCount - 1].callback();
             }
             return true;
@@ -191,6 +207,8 @@ private:
     Button  m_buttons[MAX_BUTTONS] = {};
     uint8_t m_buttonCount = 0;
     uint8_t m_selectedButton = 0;
+    ButtonCallback m_escapeCallback = nullptr;
+    bool m_hasEscapeCallback = false;
 };
 
 } // namespace CardGFX

@@ -422,6 +422,18 @@ bool ChessScene::onInput(const InputEvent& event) {
 // ── Game Logic ────────────────────────────────────────────────────
 
 void ChessScene::newGame() {
+    // Clear puzzle state (in case we're coming from puzzle mode)
+    m_puzzleMode = false;
+    m_puzzleAutoPlayPending = false;
+    m_puzzleHintLevel = 0;
+
+    // Cancel any in-progress animation
+    m_moveAnim.active = false;
+    m_moveAnim.pendingFlip = false;
+
+    // Stop timer (setTimeControl will re-init if needed)
+    m_timerRunning = false;
+
     m_board.setVariant(m_variant);
     m_board.setPositionIndex(m_positionIndex);
     m_board.reset();
@@ -435,6 +447,7 @@ void ChessScene::newGame() {
     m_legalMoves.clear();
 
     m_moveList.clearItems();
+    m_movesLabel.setText("Moves");
     m_boardGrid.clearAllFlags();
     // Start cursor on the human's king
     uint8_t startRow = 0;
@@ -914,6 +927,7 @@ void ChessScene::showPromotionModal(const Move& baseMove) {
     };
 
     m_promotionModal.clearButtons();
+    m_promotionModal.setEscapeCallback([](){});  // Must choose a piece
     m_promotionModal.setTitle("Promote to:");
     m_promotionModal.setMessage("");
 
@@ -1226,6 +1240,10 @@ bool ChessScene::loadSavedGame() {
     m_localColor = localCol;
     m_boardFlipped = flipped;
     m_netMode = NetworkMode::Local;
+    m_puzzleMode = false;
+    m_puzzleAutoPlayPending = false;
+    m_moveAnim.active = false;
+    m_moveAnim.pendingFlip = false;
 
     // For local pass-and-play, recalculate flip from sideToMove
     // (saveGameState runs before the pending animation flip completes)
@@ -1438,6 +1456,8 @@ void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
     m_moveList.clearItems();
     m_boardGrid.clearAllFlags();
     m_moveAnim.active = false;
+    m_timerRunning = false;
+    m_timeControl = TimeControl::None;
 
     // Flip board if Black to move
     m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
@@ -1509,6 +1529,10 @@ void ChessScene::clearNetworkMode() {
     m_applyingRemoteMove = false;
     m_awaitingAck = false;
     m_disconnectShown = false;
+    m_lastSentSeq = 0;
+    m_lastSendTime = 0;
+    m_retryCount = 0;
+    m_disconnectGraceUntil = 0;
     newGame();
 }
 
