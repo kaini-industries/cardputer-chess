@@ -49,6 +49,18 @@ public:
     ChessVariant variant() const { return m_variant; }
     void setVariant(ChessVariant v) { m_variant = v; }
 
+    // Chess960 initial piece positions
+    uint16_t positionIndex() const { return m_positionIndex; }
+    void setPositionIndex(uint16_t idx) { m_positionIndex = idx; }
+    uint8_t initKingCol() const { return m_initKingCol; }
+    uint8_t initRookKS() const { return m_initRookKS; }
+    uint8_t initRookQS() const { return m_initRookQS; }
+    void setInitialColumns(uint8_t kingCol, uint8_t rookKS, uint8_t rookQS) {
+        m_initKingCol = kingCol;
+        m_initRookKS = rookKS;
+        m_initRookQS = rookQS;
+    }
+
 private:
     Piece        m_board[8][8];       // [row][col]
     PieceColor   m_sideToMove;
@@ -57,6 +69,10 @@ private:
     uint8_t      m_halfmoveClock;
     uint16_t     m_fullmoveNumber;
     ChessVariant m_variant = ChessVariant::Standard;
+    uint16_t     m_positionIndex = 518;
+    uint8_t      m_initKingCol = 4;
+    uint8_t      m_initRookKS = 7;
+    uint8_t      m_initRookQS = 0;
 };
 
 #endif // CHESS_BOARD_H

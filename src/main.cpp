@@ -2,6 +2,7 @@
 #include <cardgfx.h>
 #include "chess_scene.h"
 #include "lobby_scene.h"
+#include "chess_opening_book.h"
 
 using namespace CardGFX;
 
@@ -24,6 +25,7 @@ void setup() {
     CardGFX::scenes().registerScene(&lobbyScene);
     CardGFX::scenes().push(&lobbyScene);
 
+    ChessOpeningBook::init();
     Serial.println("BOOT OK - Chess");
 }
 

@@ -1,4 +1,5 @@
 #include "chess_board.h"
+#include "chess960.h"
 
 ChessBoard::ChessBoard() {
     reset();
@@ -8,29 +9,44 @@ void ChessBoard::reset() {
     // Clear the board
     memset(m_board, 0, sizeof(m_board));
 
-    // White pieces (row 0 = rank 1)
-    m_board[0][0] = makePiece(PieceType::Rook,   PieceColor::White);
-    m_board[0][1] = makePiece(PieceType::Knight, PieceColor::White);
-    m_board[0][2] = makePiece(PieceType::Bishop, PieceColor::White);
-    m_board[0][3] = makePiece(PieceType::Queen,  PieceColor::White);
-    m_board[0][4] = makePiece(PieceType::King,   PieceColor::White);
-    m_board[0][5] = makePiece(PieceType::Bishop, PieceColor::White);
-    m_board[0][6] = makePiece(PieceType::Knight, PieceColor::White);
-    m_board[0][7] = makePiece(PieceType::Rook,   PieceColor::White);
-    for (uint8_t c = 0; c < 8; c++) {
-        m_board[1][c] = makePiece(PieceType::Pawn, PieceColor::White);
+    if (m_variant == ChessVariant::Chess960) {
+        Chess960Position pos = chess960Generate(m_positionIndex);
+        m_initKingCol = pos.kingCol;
+        m_initRookKS = pos.rookKS;
+        m_initRookQS = pos.rookQS;
+
+        for (uint8_t c = 0; c < 8; c++) {
+            m_board[0][c] = makePiece(pos.backRank[c], PieceColor::White);
+            m_board[7][c] = makePiece(pos.backRank[c], PieceColor::Black);
+        }
+    } else {
+        m_initKingCol = 4;
+        m_initRookKS = 7;
+        m_initRookQS = 0;
+
+        // White pieces (row 0 = rank 1)
+        m_board[0][0] = makePiece(PieceType::Rook,   PieceColor::White);
+        m_board[0][1] = makePiece(PieceType::Knight, PieceColor::White);
+        m_board[0][2] = makePiece(PieceType::Bishop, PieceColor::White);
+        m_board[0][3] = makePiece(PieceType::Queen,  PieceColor::White);
+        m_board[0][4] = makePiece(PieceType::King,   PieceColor::White);
+        m_board[0][5] = makePiece(PieceType::Bishop, PieceColor::White);
+        m_board[0][6] = makePiece(PieceType::Knight, PieceColor::White);
+        m_board[0][7] = makePiece(PieceType::Rook,   PieceColor::White);
+
+        // Black pieces (row 7 = rank 8)
+        m_board[7][0] = makePiece(PieceType::Rook,   PieceColor::Black);
+        m_board[7][1] = makePiece(PieceType::Knight, PieceColor::Black);
+        m_board[7][2] = makePiece(PieceType::Bishop, PieceColor::Black);
+        m_board[7][3] = makePiece(PieceType::Queen,  PieceColor::Black);
+        m_board[7][4] = makePiece(PieceType::King,   PieceColor::Black);
+        m_board[7][5] = makePiece(PieceType::Bishop, PieceColor::Black);
+        m_board[7][6] = makePiece(PieceType::Knight, PieceColor::Black);
+        m_board[7][7] = makePiece(PieceType::Rook,   PieceColor::Black);
     }
 
-    // Black pieces (row 7 = rank 8)
-    m_board[7][0] = makePiece(PieceType::Rook,   PieceColor::Black);
-    m_board[7][1] = makePiece(PieceType::Knight, PieceColor::Black);
-    m_board[7][2] = makePiece(PieceType::Bishop, PieceColor::Black);
-    m_board[7][3] = makePiece(PieceType::Queen,  PieceColor::Black);
-    m_board[7][4] = makePiece(PieceType::King,   PieceColor::Black);
-    m_board[7][5] = makePiece(PieceType::Bishop, PieceColor::Black);
-    m_board[7][6] = makePiece(PieceType::Knight, PieceColor::Black);
-    m_board[7][7] = makePiece(PieceType::Rook,   PieceColor::Black);
     for (uint8_t c = 0; c < 8; c++) {
+        m_board[1][c] = makePiece(PieceType::Pawn, PieceColor::White);
         m_board[6][c] = makePiece(PieceType::Pawn, PieceColor::Black);
     }
 
@@ -105,28 +121,35 @@ MoveRecord ChessBoard::makeMove(const Move& move) {
         record.capturedSquare = move.to;
     }
 
-    // Move the piece
-    set(move.to.col, move.to.row, movingPiece);
-    set(move.from.col, move.from.row, Piece{});
-
-    // Handle promotion
-    if (move.promotion != PieceType::None) {
-        set(move.to.col, move.to.row, makePiece(move.promotion, movingPiece.color));
-    }
-
-    // Handle castling — move the rook
+    // Handle castling — clear both pieces first, then place at destinations
+    // (must be done before normal move to handle 960 overlapping positions)
     if (move.isCastle) {
         uint8_t row = move.from.row;
-        if (move.to.col > move.from.col) {
-            // Kingside: rook from h-file to f-file
-            Piece rook = at(7, row);
-            set(5, row, rook);
-            set(7, row, Piece{});
+        uint8_t rookFromCol, rookToCol;
+        if (move.to.col == 6) {
+            // Kingside: king→g, rook→f
+            rookFromCol = m_initRookKS;
+            rookToCol = 5;
         } else {
-            // Queenside: rook from a-file to d-file
-            Piece rook = at(0, row);
-            set(3, row, rook);
-            set(0, row, Piece{});
+            // Queenside: king→c, rook→d
+            rookFromCol = m_initRookQS;
+            rookToCol = 3;
+        }
+        Piece rook = makePiece(PieceType::Rook, movingPiece.color);
+        // Clear both source squares first
+        set(move.from.col, row, Piece{});
+        set(rookFromCol, row, Piece{});
+        // Place both at destinations
+        set(move.to.col, row, movingPiece);
+        set(rookToCol, row, rook);
+    } else {
+        // Normal move
+        set(move.to.col, move.to.row, movingPiece);
+        set(move.from.col, move.from.row, Piece{});
+
+        // Handle promotion
+        if (move.promotion != PieceType::None) {
+            set(move.to.col, move.to.row, makePiece(move.promotion, movingPiece.color));
         }
     }
 
@@ -169,12 +192,16 @@ MoveRecord ChessBoard::makeMove(const Move& move) {
             m_castleRights &= ~CastleRights::BlackAll;
         }
     }
-    // Rook moves or is captured
+    // Rook moves or is captured — use stored initial columns (supports 960)
     auto clearRookRights = [&](uint8_t col, uint8_t row) {
-        if (row == 0 && col == 0) m_castleRights &= ~CastleRights::WhiteQueen;
-        if (row == 0 && col == 7) m_castleRights &= ~CastleRights::WhiteKing;
-        if (row == 7 && col == 0) m_castleRights &= ~CastleRights::BlackQueen;
-        if (row == 7 && col == 7) m_castleRights &= ~CastleRights::BlackKing;
+        if (row == 0) {
+            if (col == m_initRookQS) m_castleRights &= ~CastleRights::WhiteQueen;
+            if (col == m_initRookKS) m_castleRights &= ~CastleRights::WhiteKing;
+        }
+        if (row == 7) {
+            if (col == m_initRookQS) m_castleRights &= ~CastleRights::BlackQueen;
+            if (col == m_initRookKS) m_castleRights &= ~CastleRights::BlackKing;
+        }
     };
     clearRookRights(move.from.col, move.from.row);
     clearRookRights(move.to.col, move.to.row);
@@ -259,19 +286,23 @@ void ChessBoard::unmakeMove(const MoveRecord& record) {
         }
     }
 
-    // Undo castling — move the rook back
+    // Undo castling — restore king and rook to initial columns
     if (move.isCastle) {
         uint8_t row = move.from.row;
-        if (move.to.col > move.from.col) {
-            // Kingside: rook back from f to h
-            Piece rook = at(5, row);
-            set(7, row, rook);
-            set(5, row, Piece{});
+        uint8_t rookFromCol, rookToCol;
+        if (move.to.col == 6) {
+            rookFromCol = m_initRookKS;
+            rookToCol = 5;
         } else {
-            // Queenside: rook back from d to a
-            Piece rook = at(3, row);
-            set(0, row, rook);
-            set(3, row, Piece{});
+            rookFromCol = m_initRookQS;
+            rookToCol = 3;
         }
+        Piece rook = makePiece(PieceType::Rook, m_sideToMove);
+        // Clear destination squares
+        set(move.to.col, row, Piece{});
+        set(rookToCol, row, Piece{});
+        // Restore to initial squares
+        set(move.from.col, row, record.movedPiece);
+        set(rookFromCol, row, rook);
     }
 }

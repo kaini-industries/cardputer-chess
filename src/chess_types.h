@@ -11,8 +11,32 @@
 
 enum class ChessVariant : uint8_t {
     Standard = 0,
-    Atomic   = 1
+    Atomic   = 1,
+    Chess960 = 2
 };
+
+enum class TimeControl : uint8_t {
+    None    = 0,
+    Bullet1 = 1,  // 1+0
+    Blitz3  = 2,  // 3+2
+    Blitz5  = 3,  // 5+3
+    Rapid10 = 4,  // 10+0
+};
+
+struct TimeControlParams {
+    uint32_t initialMs;
+    uint32_t incrementMs;
+};
+
+inline TimeControlParams getTimeControlParams(TimeControl tc) {
+    switch (tc) {
+        case TimeControl::Bullet1: return {60000, 0};
+        case TimeControl::Blitz3:  return {180000, 2000};
+        case TimeControl::Blitz5:  return {300000, 3000};
+        case TimeControl::Rapid10: return {600000, 0};
+        default:                   return {0, 0};
+    }
+}
 
 enum class PieceType : uint8_t {
     None   = 0,

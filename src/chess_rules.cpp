@@ -239,22 +239,45 @@ static void addKingMoves(const ChessBoard& board, uint8_t col, uint8_t row,
         }
     }
 
-    // Castling
+    // Castling (generalized for standard and Chess960)
     PieceColor opp = opponent(color);
     uint8_t kingRow = (color == PieceColor::White) ? 0 : 7;
 
-    // Only if king is on its starting square
-    if (col != 4 || row != kingRow) return;
+    // Only if king is on its initial column
+    if (col != board.initKingCol() || row != kingRow) return;
 
     // Don't castle out of check
     if (isAttacked(board, col, row, opp)) return;
 
-    // Kingside
+    // Check that all squares in a range are empty, excluding two specific columns
+    auto squaresClear = [&](uint8_t a, uint8_t b, uint8_t exA, uint8_t exB) -> bool {
+        uint8_t lo = (a < b) ? a : b;
+        uint8_t hi = (a < b) ? b : a;
+        for (uint8_t c = lo; c <= hi; c++) {
+            if (c == exA || c == exB) continue;
+            if (!board.at(c, kingRow).empty()) return false;
+        }
+        return true;
+    };
+
+    // Check that king doesn't pass through or land on attacked square
+    auto kingPathSafe = [&](uint8_t fromCol, uint8_t toCol) -> bool {
+        uint8_t lo = (fromCol < toCol) ? fromCol : toCol;
+        uint8_t hi = (fromCol < toCol) ? toCol : fromCol;
+        for (uint8_t c = lo; c <= hi; c++) {
+            if (isAttacked(board, c, kingRow, opp)) return false;
+        }
+        return true;
+    };
+
+    // Kingside: king → g-file (col 6), rook → f-file (col 5)
     if (board.canCastleKS(color)) {
-        // Squares f and g must be empty, king must not pass through check
-        if (board.at(5, kingRow).empty() && board.at(6, kingRow).empty() &&
-            !isAttacked(board, 5, kingRow, opp) &&
-            !isAttacked(board, 6, kingRow, opp)) {
+        uint8_t rookCol = board.initRookKS();
+        Piece rookPiece = board.at(rookCol, kingRow);
+        if (rookPiece.type == PieceType::Rook && rookPiece.color == color &&
+            squaresClear(col, 6, col, rookCol) &&
+            squaresClear(rookCol, 5, col, rookCol) &&
+            kingPathSafe(col, 6)) {
             Move m;
             m.from = from;
             m.to = makeSquare(6, kingRow);
@@ -263,13 +286,14 @@ static void addKingMoves(const ChessBoard& board, uint8_t col, uint8_t row,
         }
     }
 
-    // Queenside
+    // Queenside: king → c-file (col 2), rook → d-file (col 3)
     if (board.canCastleQS(color)) {
-        // Squares b, c, d must be empty, king must not pass through check on d and c
-        if (board.at(1, kingRow).empty() && board.at(2, kingRow).empty() &&
-            board.at(3, kingRow).empty() &&
-            !isAttacked(board, 2, kingRow, opp) &&
-            !isAttacked(board, 3, kingRow, opp)) {
+        uint8_t rookCol = board.initRookQS();
+        Piece rookPiece = board.at(rookCol, kingRow);
+        if (rookPiece.type == PieceType::Rook && rookPiece.color == color &&
+            squaresClear(col, 2, col, rookCol) &&
+            squaresClear(rookCol, 3, col, rookCol) &&
+            kingPathSafe(col, 2)) {
             Move m;
             m.from = from;
             m.to = makeSquare(2, kingRow);
@@ -390,6 +414,7 @@ bool isInsufficientMaterial(const ChessBoard& board) {
     uint8_t whiteKnights = 0, whiteBishops = 0;
     uint8_t blackKnights = 0, blackBishops = 0;
     uint8_t otherPieces = 0;
+    uint8_t bishopColorMask = 0; // bit 0 = light square bishop exists, bit 1 = dark
 
     for (uint8_t r = 0; r < 8; r++) {
         for (uint8_t c = 0; c < 8; c++) {
@@ -402,6 +427,7 @@ bool isInsufficientMaterial(const ChessBoard& board) {
             } else if (p.type == PieceType::Bishop) {
                 if (p.color == PieceColor::White) whiteBishops++;
                 else blackBishops++;
+                bishopColorMask |= (1 << ((c + r) & 1));
             } else {
                 otherPieces++;
             }
@@ -416,6 +442,9 @@ bool isInsufficientMaterial(const ChessBoard& board) {
     if (totalMinor == 0) return true;
     // K+B vs K or K+N vs K
     if (totalMinor == 1) return true;
+    // K+B vs K+B — all bishops on same color square
+    if (totalMinor == 2 && whiteKnights == 0 && blackKnights == 0 &&
+        (bishopColorMask == 1 || bishopColorMask == 2)) return true;
 
     return false;
 }

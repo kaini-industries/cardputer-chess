@@ -10,7 +10,7 @@
 // All structs are packed to match wire format exactly.
 // =====================================================================
 
-static constexpr uint8_t NET_PROTOCOL_VERSION = 1;
+static constexpr uint8_t NET_PROTOCOL_VERSION = 2;
 
 enum class NetMsgType : uint8_t {
     Discovery    = 0x01,
@@ -30,6 +30,9 @@ struct DiscoveryMsg {
     NetMsgType type = NetMsgType::Discovery;
     uint8_t    version = NET_PROTOCOL_VERSION;
     uint16_t   gameId = 0;
+    uint8_t    variant = 0;        // ChessVariant as uint8_t
+    uint16_t   positionIndex = 518; // Chess960 position (518 = standard)
+    uint8_t    timeControl = 0;    // TimeControl as uint8_t
 };
 
 struct AcceptGameMsg {
@@ -40,7 +43,10 @@ struct AcceptGameMsg {
 
 struct GameStartMsg {
     NetMsgType type = NetMsgType::GameStart;
-    uint8_t    yourColor = 0; // 0 = White, 1 = Black
+    uint8_t    yourColor = 0;      // 0 = White, 1 = Black
+    uint8_t    variant = 0;        // ChessVariant as uint8_t
+    uint16_t   positionIndex = 518;
+    uint8_t    timeControl = 0;    // TimeControl as uint8_t
 };
 
 // ── Gameplay ─────────────────────────────────────────────────────────

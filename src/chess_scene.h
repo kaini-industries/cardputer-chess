@@ -7,6 +7,8 @@
 #include "chess_ai.h"
 #include "chess_net_protocol.h"
 #include "chess_storage.h"
+#include "puzzle_data.h"
+#include "puzzle_storage.h"
 
 using namespace CardGFX;
 
@@ -37,7 +39,8 @@ private:
         SelectPiece,       // Cursor free, no piece selected
         ShowMoves,         // Piece selected, valid moves highlighted
         PromotionPending,  // Waiting for promotion choice
-        GameOver           // Game ended
+        GameOver,          // Game ended
+        Reviewing          // Stepping through move history
     };
 
     UIState m_uiState = UIState::SelectPiece;
@@ -78,6 +81,28 @@ private:
 
     // ── Game Variant ──────────────────────────────────────────
     ChessVariant m_variant = ChessVariant::Standard;
+    uint16_t m_positionIndex = 518; // Chess960 position index
+
+    // ── Timer State ──────────────────────────────────────────
+    TimeControl m_timeControl = TimeControl::None;
+    uint32_t m_timeWhiteMs = 0;
+    uint32_t m_timeBlackMs = 0;
+    bool m_timerRunning = false;
+
+    // ── Review State ─────────────────────────────────────────
+    uint8_t m_reviewIndex = 0;
+    UIState m_preReviewState = UIState::GameOver;
+
+    // ── Puzzle Mode ───────────────────────────────────────────
+    bool m_puzzleMode = false;
+    uint8_t m_puzzleIndex = 0;
+    uint8_t m_puzzleSolutionStep = 0;
+    uint8_t m_puzzleSolutionLen = 0;
+    Move m_puzzleSolution[4];
+    PuzzleProgress m_puzzleProgress;
+    bool m_puzzleAutoPlayPending = false;
+    int32_t m_puzzleAutoPlayDelay = 0;
+    uint8_t m_puzzleHintLevel = 0;
 
     // ── AI Mode ────────────────────────────────────────────────
     AIDifficulty m_aiDifficulty = AIDifficulty::None;
@@ -98,6 +123,7 @@ private:
     uint8_t  m_retryCount = 0;
     MoveNetMsg m_lastSentMove;    // For retransmission
     bool     m_disconnectShown = false;
+    uint32_t m_disconnectGraceUntil = 0; // Grace period after "Wait" click
 
     // ── Widgets ───────────────────────────────────────────────────
     StatusBar m_statusBar;
@@ -123,6 +149,14 @@ private:
     void showPromotionModal(const Move& baseMove);
     void showGameOverModal(const char* title, const char* message);
     void rebuildMoveList();
+
+    // Review mode
+    void enterReviewMode();
+    void exitReviewMode();
+    void reviewGoTo(uint8_t index);
+
+    // Timer helpers
+    static void formatTime(char* buf, uint8_t bufLen, uint32_t ms);
 
     // Persistence
     void saveGameState();
@@ -152,6 +186,12 @@ public:
     // Called by LobbyScene to set the game variant
     void setVariant(ChessVariant v);
 
+    // Called by LobbyScene to set Chess960 position
+    void setPositionIndex(uint16_t idx);
+
+    // Called by LobbyScene to set time control
+    void setTimeControl(TimeControl tc);
+
     // Called by LobbyScene to configure AI mode before pushing
     void setAIMode(AIDifficulty difficulty, PieceColor aiColor);
     void clearAIMode();
@@ -162,6 +202,10 @@ public:
 
     // Called by LobbyScene to resume a saved game
     bool loadSavedGame();
+
+    // Called by LobbyScene to start puzzle mode
+    void setPuzzleMode(uint8_t puzzleIndex);
+    void clearPuzzleMode();
 
     // Cell renderer -- draws pieces and highlights on the board
     static void renderCell(Canvas& canvas, uint8_t col, uint8_t row,

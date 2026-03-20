@@ -4,8 +4,8 @@
 
 // ─── Binary Save Format ──────────────────────────────────────────────
 //
-// Version 2 layout (extends v1 with variant and atomic explosion data):
-//   [0]       version (0x02)
+// Version 3 layout (extends v2 with 960 position and timer):
+//   [0]       version (0x03)
 //   [1..64]   board squares — 1 byte each: (type << 4) | (color << 0)
 //   [65]      sideToMove
 //   [66]      castleRights
@@ -19,7 +19,12 @@
 //   [76]      localColor
 //   [77]      boardFlipped
 //   [78]      variant (ChessVariant)
-//   [79..]    history records (33 bytes each)
+//   [79..80]  positionIndex (little-endian uint16)
+//   [81]      timeControl (TimeControl)
+//   [82..85]  timeWhiteMs (little-endian uint32)
+//   [86..89]  timeBlackMs (little-endian uint32)
+//   [90]      timerRunning
+//   [91..]    history records (33 bytes each)
 //
 // Each MoveRecord packed as 33 bytes:
 //   [0]  from.col, [1]  from.row
@@ -37,12 +42,16 @@
 
 static constexpr uint8_t SAVE_VERSION_V1 = 0x01;
 static constexpr uint8_t SAVE_VERSION_V2 = 0x02;
-static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V2;
+static constexpr uint8_t SAVE_VERSION_V3 = 0x03;
+static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V3;
 
 static constexpr size_t HEADER_SIZE_V1 = 78;
 static constexpr size_t RECORD_SIZE_V1 = 14;
 
-static constexpr size_t HEADER_SIZE = 79;
+static constexpr size_t HEADER_SIZE_V2 = 79;
+static constexpr size_t RECORD_SIZE_V2 = 33;
+
+static constexpr size_t HEADER_SIZE = 91;
 static constexpr size_t RECORD_SIZE = 33;
 
 static constexpr const char* NVS_NAMESPACE = "chess";
@@ -112,12 +121,35 @@ static void unpackRecordV1(const uint8_t* src, MoveRecord& rec) {
     rec.explodedMask = 0;    // No atomic data in v1
 }
 
+static inline void writeU16LE(uint8_t* dst, uint16_t val) {
+    dst[0] = (uint8_t)(val & 0xFF);
+    dst[1] = (uint8_t)(val >> 8);
+}
+
+static inline void writeU32LE(uint8_t* dst, uint32_t val) {
+    dst[0] = (uint8_t)(val & 0xFF);
+    dst[1] = (uint8_t)((val >> 8) & 0xFF);
+    dst[2] = (uint8_t)((val >> 16) & 0xFF);
+    dst[3] = (uint8_t)((val >> 24) & 0xFF);
+}
+
+static inline uint16_t readU16LE(const uint8_t* src) {
+    return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+}
+
+static inline uint32_t readU32LE(const uint8_t* src) {
+    return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
+           ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
+}
+
 void saveGame(const ChessBoard& board,
               const MoveRecord* history, uint8_t historyCount,
               bool historyOverflow,
               AIDifficulty aiDifficulty, PieceColor aiColor,
               PieceColor localColor, bool boardFlipped,
-              ChessVariant variant) {
+              ChessVariant variant, uint16_t positionIndex,
+              TimeControl timeControl, uint32_t timeWhiteMs,
+              uint32_t timeBlackMs, bool timerRunning) {
 
     size_t totalSize = HEADER_SIZE + (size_t)historyCount * RECORD_SIZE;
 
@@ -142,8 +174,7 @@ void saveGame(const ChessBoard& board,
     buf[67] = board.enPassantTarget().col;
     buf[68] = board.enPassantTarget().row;
     buf[69] = board.halfmoveClock();
-    buf[70] = (uint8_t)(board.fullmoveNumber() & 0xFF);
-    buf[71] = (uint8_t)(board.fullmoveNumber() >> 8);
+    writeU16LE(buf + 70, board.fullmoveNumber());
     buf[72] = historyCount;
     buf[73] = historyOverflow ? 0x01 : 0x00;
     buf[74] = static_cast<uint8_t>(aiDifficulty);
@@ -151,6 +182,11 @@ void saveGame(const ChessBoard& board,
     buf[76] = static_cast<uint8_t>(localColor);
     buf[77] = boardFlipped ? 1 : 0;
     buf[78] = static_cast<uint8_t>(variant);
+    writeU16LE(buf + 79, positionIndex);
+    buf[81] = static_cast<uint8_t>(timeControl);
+    writeU32LE(buf + 82, timeWhiteMs);
+    writeU32LE(buf + 86, timeBlackMs);
+    buf[90] = timerRunning ? 1 : 0;
 
     // History records
     for (uint8_t i = 0; i < historyCount; i++) {
@@ -171,7 +207,9 @@ bool loadGame(ChessBoard& board,
               bool& historyOverflow,
               AIDifficulty& aiDifficulty, PieceColor& aiColor,
               PieceColor& localColor, bool& boardFlipped,
-              ChessVariant& variant) {
+              ChessVariant& variant, uint16_t& positionIndex,
+              TimeControl& timeControl, uint32_t& timeWhiteMs,
+              uint32_t& timeBlackMs, bool& timerRunning) {
 
     Preferences prefs;
     prefs.begin(NVS_NAMESPACE, true); // read-only
@@ -189,7 +227,8 @@ bool loadGame(ChessBoard& board,
     prefs.end();
 
     uint8_t version = buf[0];
-    if (version != SAVE_VERSION_V1 && version != SAVE_VERSION_V2) {
+    if (version != SAVE_VERSION_V1 && version != SAVE_VERSION_V2 &&
+        version != SAVE_VERSION_V3) {
         delete[] buf;
         return false;
     }
@@ -209,7 +248,7 @@ bool loadGame(ChessBoard& board,
     board.setCastleRights(buf[66]);
     board.setEnPassantTarget(makeSquare(buf[67], buf[68]));
     board.setHalfmoveClock(buf[69]);
-    board.setFullmoveNumber((uint16_t)buf[70] | ((uint16_t)buf[71] << 8));
+    board.setFullmoveNumber(readU16LE(buf + 70));
 
     historyCount = buf[72];
     historyOverflow = (buf[73] & 0x01) != 0;
@@ -218,15 +257,40 @@ bool loadGame(ChessBoard& board,
     localColor = static_cast<PieceColor>(buf[76]);
     boardFlipped = buf[77] != 0;
 
-    if (version == SAVE_VERSION_V2) {
+    // Variant (v2+)
+    if (version >= SAVE_VERSION_V2) {
         variant = static_cast<ChessVariant>(buf[78]);
     } else {
         variant = ChessVariant::Standard;
     }
 
+    // Position index and timer (v3+)
+    if (version >= SAVE_VERSION_V3 && len >= HEADER_SIZE) {
+        positionIndex = readU16LE(buf + 79);
+        timeControl = static_cast<TimeControl>(buf[81]);
+        timeWhiteMs = readU32LE(buf + 82);
+        timeBlackMs = readU32LE(buf + 86);
+        timerRunning = buf[90] != 0;
+    } else {
+        positionIndex = 518;
+        timeControl = TimeControl::None;
+        timeWhiteMs = 0;
+        timeBlackMs = 0;
+        timerRunning = false;
+    }
+
     // Determine record layout based on version
-    size_t headerSize = (version == SAVE_VERSION_V2) ? HEADER_SIZE : HEADER_SIZE_V1;
-    size_t recordSize = (version == SAVE_VERSION_V2) ? RECORD_SIZE : RECORD_SIZE_V1;
+    size_t headerSize, recordSize;
+    if (version >= SAVE_VERSION_V3) {
+        headerSize = HEADER_SIZE;
+        recordSize = RECORD_SIZE;
+    } else if (version == SAVE_VERSION_V2) {
+        headerSize = HEADER_SIZE_V2;
+        recordSize = RECORD_SIZE_V2;
+    } else {
+        headerSize = HEADER_SIZE_V1;
+        recordSize = RECORD_SIZE_V1;
+    }
 
     // Validate history fits in buffer
     size_t expectedSize = headerSize + (size_t)historyCount * recordSize;
@@ -236,7 +300,7 @@ bool loadGame(ChessBoard& board,
 
     // Unpack history records
     for (uint8_t i = 0; i < historyCount; i++) {
-        if (version == SAVE_VERSION_V2) {
+        if (version >= SAVE_VERSION_V2) {
             unpackRecord(buf + headerSize + (size_t)i * recordSize, history[i]);
         } else {
             unpackRecordV1(buf + headerSize + (size_t)i * recordSize, history[i]);
@@ -252,7 +316,7 @@ bool hasSave() {
     prefs.begin(NVS_NAMESPACE, true);
     size_t len = prefs.getBytesLength(NVS_KEY);
     prefs.end();
-    return len >= HEADER_SIZE_V1; // Accept both v1 and v2
+    return len >= HEADER_SIZE_V1; // Accept v1, v2, and v3
 }
 
 void clearSave() {

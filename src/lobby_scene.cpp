@@ -1,6 +1,7 @@
 #include "lobby_scene.h"
 #include "chess_scene.h"
 #include "chess_storage.h"
+#include "chess960.h"
 #include "esp_now_transport.h"
 #include <Arduino.h>
 #include <esp_random.h>
@@ -48,7 +49,9 @@ void LobbyScene::onEnter() {
 }
 
 void LobbyScene::onExit() {
-    // Hide any visible modals
+    if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining) {
+        EspNowTransport::instance().shutdown();
+    }
     m_menuModal.hide();
 }
 
@@ -65,14 +68,12 @@ void LobbyScene::showMenu() {
     m_menuModal.setTitle(titleBuf);
     m_menuModal.setMessage("Choose mode:");
 
-    // Show Resume button if a saved game exists
     if (ChessStorage::hasSave()) {
         m_menuModal.addButton("Resume", [this]() {
             m_menuModal.hide();
             if (m_chessScene->loadSavedGame()) {
                 CardGFX::scenes().push(m_chessScene);
             } else {
-                // Save was corrupted — clear it and stay in menu
                 ChessStorage::clearSave();
                 showMenu();
             }
@@ -94,12 +95,17 @@ void LobbyScene::showMenu() {
     m_menuModal.addButton("Host", [this]() {
         m_menuModal.hide();
         ChessStorage::clearSave();
-        startHosting();
+        m_pendingMode = PendingMode::Host;
+        showVariantMenu();
     });
     m_menuModal.addButton("Join", [this]() {
         m_menuModal.hide();
         ChessStorage::clearSave();
         startJoining();
+    });
+    m_menuModal.addButton("Puzzles", [this]() {
+        m_menuModal.hide();
+        showPuzzleMenu();
     });
 
     m_menuModal.show();
@@ -118,11 +124,19 @@ void LobbyScene::showVariantMenu() {
 
     m_menuModal.addButton("Standard", [this]() {
         m_selectedVariant = ChessVariant::Standard;
+        m_positionIndex = 518;
         m_menuModal.hide();
         onVariantSelected();
     });
     m_menuModal.addButton("Atomic", [this]() {
         m_selectedVariant = ChessVariant::Atomic;
+        m_positionIndex = 518;
+        m_menuModal.hide();
+        onVariantSelected();
+    });
+    m_menuModal.addButton("Chess960", [this]() {
+        m_selectedVariant = ChessVariant::Chess960;
+        m_positionIndex = chess960RandomIndex();
         m_menuModal.hide();
         onVariantSelected();
     });
@@ -132,15 +146,66 @@ void LobbyScene::showVariantMenu() {
 }
 
 void LobbyScene::onVariantSelected() {
-    m_chessScene->setVariant(m_selectedVariant);
+    showTimeControlMenu();
+}
+
+void LobbyScene::showTimeControlMenu() {
+    m_state = LobbyState::TimeSelect;
+    m_statusBar.setLeft("Time");
+    m_statusBar.setRight("ESC=Back");
+
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Time Control");
+    m_menuModal.setMessage("Choose clock:");
+
+    m_menuModal.addButton("No Timer", [this]() {
+        m_selectedTimeControl = TimeControl::None;
+        m_menuModal.hide();
+        onTimeSelected();
+    });
+    m_menuModal.addButton("1+0", [this]() {
+        m_selectedTimeControl = TimeControl::Bullet1;
+        m_menuModal.hide();
+        onTimeSelected();
+    });
+    m_menuModal.addButton("3+2", [this]() {
+        m_selectedTimeControl = TimeControl::Blitz3;
+        m_menuModal.hide();
+        onTimeSelected();
+    });
+    m_menuModal.addButton("5+3", [this]() {
+        m_selectedTimeControl = TimeControl::Blitz5;
+        m_menuModal.hide();
+        onTimeSelected();
+    });
+    m_menuModal.addButton("10+0", [this]() {
+        m_selectedTimeControl = TimeControl::Rapid10;
+        m_menuModal.hide();
+        onTimeSelected();
+    });
+
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+}
+
+void LobbyScene::onTimeSelected() {
     if (m_pendingMode == PendingMode::Local) {
         startLocalGame();
-    } else {
+    } else if (m_pendingMode == PendingMode::AI) {
         showAIDifficultyMenu();
+    } else {
+        startHosting();
     }
 }
 
+void LobbyScene::configureChessScene() {
+    m_chessScene->setVariant(m_selectedVariant);
+    m_chessScene->setPositionIndex(m_positionIndex);
+    m_chessScene->setTimeControl(m_selectedTimeControl);
+}
+
 void LobbyScene::startLocalGame() {
+    configureChessScene();
     m_chessScene->clearNetworkMode();
     CardGFX::scenes().push(m_chessScene);
 }
@@ -184,11 +249,11 @@ void LobbyScene::showAIColorMenu() {
 
     m_menuModal.addButton("White", [this]() {
         m_menuModal.hide();
-        startAIGame(PieceColor::Black); // AI plays Black
+        startAIGame(PieceColor::Black);
     });
     m_menuModal.addButton("Black", [this]() {
         m_menuModal.hide();
-        startAIGame(PieceColor::White); // AI plays White
+        startAIGame(PieceColor::White);
     });
 
     m_menuModal.show();
@@ -196,6 +261,7 @@ void LobbyScene::showAIColorMenu() {
 }
 
 void LobbyScene::startAIGame(PieceColor aiColor) {
+    configureChessScene();
     m_chessScene->setAIMode(m_selectedDifficulty, aiColor);
     CardGFX::scenes().push(m_chessScene);
 }
@@ -205,7 +271,6 @@ void LobbyScene::startHosting() {
     m_localColor = PieceColor::White;
     m_titleLabel.setVisible(false);
 
-    // Initialize ESP-NOW
     auto& transport = EspNowTransport::instance();
     if (!transport.init()) {
         m_statusLabel.setText("ESP-NOW init failed!");
@@ -213,7 +278,6 @@ void LobbyScene::startHosting() {
         return;
     }
 
-    // Generate random game ID
     m_gameId = (uint16_t)(esp_random() & 0xFFFF);
     m_lastBroadcast = 0;
     m_stateStartTime = millis();
@@ -228,7 +292,6 @@ void LobbyScene::startJoining() {
     m_localColor = PieceColor::Black;
     m_titleLabel.setVisible(false);
 
-    // Initialize ESP-NOW
     auto& transport = EspNowTransport::instance();
     if (!transport.init()) {
         m_statusLabel.setText("ESP-NOW init failed!");
@@ -251,7 +314,7 @@ void LobbyScene::onPaired() {
     m_state = LobbyState::Paired;
     m_statusLabel.setText("Connected!");
 
-    // Configure chess scene for network play and push it
+    configureChessScene();
     m_chessScene->setNetworkMode(m_localColor);
     CardGFX::scenes().push(m_chessScene);
 }
@@ -266,6 +329,9 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
             m_lastBroadcast = now;
             DiscoveryMsg disc;
             disc.gameId = m_gameId;
+            disc.variant = static_cast<uint8_t>(m_selectedVariant);
+            disc.positionIndex = m_positionIndex;
+            disc.timeControl = static_cast<uint8_t>(m_selectedTimeControl);
             transport.broadcast(
                 reinterpret_cast<const uint8_t*>(&disc), sizeof(disc));
         }
@@ -282,10 +348,12 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 AcceptGameMsg accept;
                 memcpy(&accept, buf, sizeof(AcceptGameMsg));
                 if (accept.gameId == m_gameId) {
-                    // Peer accepted — add them and send GameStart
                     transport.addPeer(mac);
                     GameStartMsg start;
-                    start.yourColor = 1; // Tell joiner they are Black
+                    start.yourColor = 1;
+                    start.variant = static_cast<uint8_t>(m_selectedVariant);
+                    start.positionIndex = m_positionIndex;
+                    start.timeControl = static_cast<uint8_t>(m_selectedTimeControl);
                     transport.send(
                         reinterpret_cast<const uint8_t*>(&start), sizeof(start));
                     onPaired();
@@ -294,14 +362,12 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
             }
         }
 
-        // Timeout after 60 seconds
         if (now - m_stateStartTime > 60000) {
             m_statusLabel.setText("Timed out.");
             cancelPairing();
         }
 
     } else if (m_state == LobbyState::Joining) {
-        // Listen for Discovery broadcasts
         uint8_t buf[32];
         uint8_t mac[6];
         while (transport.hasReceived()) {
@@ -314,8 +380,10 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 memcpy(&disc, buf, sizeof(DiscoveryMsg));
 
                 if (disc.version == NET_PROTOCOL_VERSION) {
-                    // Found a host — add peer and send accept
                     m_gameId = disc.gameId;
+                    m_selectedVariant = static_cast<ChessVariant>(disc.variant);
+                    m_positionIndex = disc.positionIndex;
+                    m_selectedTimeControl = static_cast<TimeControl>(disc.timeControl);
                     memcpy(m_peerMac, mac, 6);
                     transport.addPeer(mac);
 
@@ -333,12 +401,14 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
 
                 m_localColor = (start.yourColor == 0)
                               ? PieceColor::White : PieceColor::Black;
+                m_selectedVariant = static_cast<ChessVariant>(start.variant);
+                m_positionIndex = start.positionIndex;
+                m_selectedTimeControl = static_cast<TimeControl>(start.timeControl);
                 onPaired();
                 return;
             }
         }
 
-        // Timeout after 60 seconds
         if (now - m_stateStartTime > 60000) {
             m_statusLabel.setText("Timed out.");
             cancelPairing();
@@ -346,10 +416,78 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
     }
 }
 
+// ── Puzzle Menu ──────────────────────────────────────────────────────
+
+void LobbyScene::showPuzzleMenu() {
+    m_state = LobbyState::PuzzleCategory;
+    m_statusBar.setLeft("Puzzles");
+    m_statusBar.setRight("ESC=Back");
+    m_titleLabel.setVisible(false);
+
+    PuzzleProgress progress;
+    PuzzleStorage::loadProgress(progress);
+
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Puzzles");
+
+    char msgBuf[32];
+    uint16_t total = puzzleCount();
+    uint16_t done = PuzzleStorage::completedCount(progress, total);
+    snprintf(msgBuf, sizeof(msgBuf), "Solved: %d/%d", done, total);
+    m_menuModal.setMessage(msgBuf);
+
+    // Next unsolved
+    m_menuModal.addButton("Next", [this]() {
+        m_menuModal.hide();
+        PuzzleProgress prog;
+        PuzzleStorage::loadProgress(prog);
+        uint16_t total = puzzleCount();
+        for (uint16_t i = 0; i < total; i++) {
+            if (!PuzzleStorage::isPuzzleCompleted(prog, (uint8_t)i)) {
+                startPuzzle((uint8_t)i);
+                return;
+            }
+        }
+        // All solved — start from 0
+        if (total > 0) startPuzzle(0);
+    });
+
+    // Categories
+    char m1Buf[16], m2Buf[16], tBuf[16];
+    snprintf(m1Buf, sizeof(m1Buf), "Mate1 (%d)", puzzleCountByType(PuzzleType::MateIn1));
+    snprintf(m2Buf, sizeof(m2Buf), "Mate2 (%d)", puzzleCountByType(PuzzleType::MateIn2));
+    snprintf(tBuf, sizeof(tBuf), "Tactic (%d)", puzzleCountByType(PuzzleType::Tactic));
+
+    m_menuModal.addButton(m1Buf, [this]() {
+        m_menuModal.hide();
+        uint16_t idx = puzzleIndexByType(PuzzleType::MateIn1, 0);
+        if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
+    });
+    m_menuModal.addButton(m2Buf, [this]() {
+        m_menuModal.hide();
+        uint16_t idx = puzzleIndexByType(PuzzleType::MateIn2, 0);
+        if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
+    });
+    m_menuModal.addButton(tBuf, [this]() {
+        m_menuModal.hide();
+        uint16_t idx = puzzleIndexByType(PuzzleType::Tactic, 0);
+        if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
+    });
+
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+}
+
+void LobbyScene::startPuzzle(uint8_t index) {
+    m_chessScene->setPuzzleMode(index);
+    CardGFX::scenes().push(m_chessScene);
+}
+
+// ── Input ────────────────────────────────────────────────────────────
+
 bool LobbyScene::onInput(const InputEvent& event) {
     if (!event.isDown()) return false;
 
-    // ESC cancels pairing or goes back in AI menus
     if (event.key == Key::ESCAPE) {
         if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining) {
             cancelPairing();
@@ -360,14 +498,24 @@ bool LobbyScene::onInput(const InputEvent& event) {
             showMenu();
             return true;
         }
-        if (m_state == LobbyState::AIDifficulty) {
+        if (m_state == LobbyState::TimeSelect) {
             m_menuModal.hide();
             showVariantMenu();
+            return true;
+        }
+        if (m_state == LobbyState::AIDifficulty) {
+            m_menuModal.hide();
+            showTimeControlMenu();
             return true;
         }
         if (m_state == LobbyState::AIColor) {
             m_menuModal.hide();
             showAIDifficultyMenu();
+            return true;
+        }
+        if (m_state == LobbyState::PuzzleCategory) {
+            m_menuModal.hide();
+            showMenu();
             return true;
         }
     }

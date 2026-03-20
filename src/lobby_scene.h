@@ -5,6 +5,8 @@
 #include "chess_types.h"
 #include "chess_ai.h"
 #include "chess_net_protocol.h"
+#include "puzzle_data.h"
+#include "puzzle_storage.h"
 
 using namespace CardGFX;
 
@@ -30,12 +32,14 @@ private:
     // ── State Machine ────────────────────────────────────────────
     enum class LobbyState : uint8_t {
         Menu,           // Showing mode selection
-        VariantSelect,  // Choosing Standard vs Atomic
+        VariantSelect,  // Choosing variant
+        TimeSelect,     // Choosing time control
         AIDifficulty,   // Choosing AI difficulty
         AIColor,        // Choosing player color vs AI
         Hosting,        // Broadcasting, waiting for joiner
         Joining,        // Listening for host broadcasts
-        Paired          // Connected, transitioning to game
+        Paired,         // Connected, transitioning to game
+        PuzzleCategory  // Choosing puzzle category
     };
 
     LobbyState m_state = LobbyState::Menu;
@@ -43,11 +47,17 @@ private:
 
     // ── Variant / Mode State ──────────────────────────────────────
     ChessVariant m_selectedVariant = ChessVariant::Standard;
-    enum class PendingMode : uint8_t { Local, AI };
+    enum class PendingMode : uint8_t { Local, AI, Host };
     PendingMode m_pendingMode = PendingMode::Local;
+
+    // ── Time Control State ────────────────────────────────────────
+    TimeControl m_selectedTimeControl = TimeControl::None;
 
     // ── AI State ────────────────────────────────────────────────
     AIDifficulty m_selectedDifficulty = AIDifficulty::None;
+
+    // ── Chess960 State ──────────────────────────────────────────
+    uint16_t m_positionIndex = 518;
 
     // ── Pairing State ────────────────────────────────────────────
     uint16_t m_gameId = 0;
@@ -66,6 +76,8 @@ private:
     void showMenu();
     void showVariantMenu();
     void onVariantSelected();
+    void showTimeControlMenu();
+    void onTimeSelected();
     void showAIDifficultyMenu();
     void showAIColorMenu();
     void startAIGame(PieceColor aiColor);
@@ -74,6 +86,9 @@ private:
     void onPaired();
     void cancelPairing();
     void startLocalGame();
+    void configureChessScene();
+    void showPuzzleMenu();
+    void startPuzzle(uint8_t index);
 };
 
 #endif // LOBBY_SCENE_H

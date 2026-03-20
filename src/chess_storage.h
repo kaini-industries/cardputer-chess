@@ -18,7 +18,9 @@ namespace ChessStorage {
                   bool historyOverflow,
                   AIDifficulty aiDifficulty, PieceColor aiColor,
                   PieceColor localColor, bool boardFlipped,
-                  ChessVariant variant);
+                  ChessVariant variant, uint16_t positionIndex,
+                  TimeControl timeControl, uint32_t timeWhiteMs,
+                  uint32_t timeBlackMs, bool timerRunning);
 
     // Load a previously saved game. Returns true if a valid save was found.
     bool loadGame(ChessBoard& board,
@@ -26,7 +28,9 @@ namespace ChessStorage {
                   bool& historyOverflow,
                   AIDifficulty& aiDifficulty, PieceColor& aiColor,
                   PieceColor& localColor, bool& boardFlipped,
-                  ChessVariant& variant);
+                  ChessVariant& variant, uint16_t& positionIndex,
+                  TimeControl& timeControl, uint32_t& timeWhiteMs,
+                  uint32_t& timeBlackMs, bool& timerRunning);
 
     // Check if a saved game exists.
     bool hasSave();

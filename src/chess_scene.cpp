@@ -1,6 +1,7 @@
 #include "chess_scene.h"
 #include "chess_rules.h"
 #include "esp_now_transport.h"
+#include "puzzle_data.h"
 #include <Arduino.h>
 #include <cstdio>
 #include <cstring>
@@ -185,8 +186,52 @@ void ChessScene::onTick(uint32_t dt_ms) {
         }
     }
 
+    // ── Timer countdown ──────────────────────────────────────
+    if (m_timeControl != TimeControl::None && m_timerRunning &&
+        m_uiState != UIState::GameOver && m_uiState != UIState::PromotionPending &&
+        m_uiState != UIState::Reviewing && !m_moveAnim.active) {
+
+        uint32_t& activeTime = (m_board.sideToMove() == PieceColor::White)
+                               ? m_timeWhiteMs : m_timeBlackMs;
+
+        if (activeTime <= dt_ms) {
+            activeTime = 0;
+            const char* winner = (m_board.sideToMove() == PieceColor::White)
+                                ? "Black wins!" : "White wins!";
+            showGameOverModal("Time's Up!", winner);
+        } else {
+            activeTime -= dt_ms;
+        }
+    }
+
     if (m_netMode == NetworkMode::Online) {
         pollNetwork();
+    }
+
+    // ── Puzzle auto-play opponent response ──────────────────
+    if (m_puzzleMode && m_puzzleAutoPlayPending && !m_moveAnim.active) {
+        m_puzzleAutoPlayDelay -= (int32_t)dt_ms;
+        if (m_puzzleAutoPlayDelay <= 0) {
+            m_puzzleAutoPlayPending = false;
+            if (m_puzzleSolutionStep < m_puzzleSolutionLen) {
+                Move responseMove = m_puzzleSolution[m_puzzleSolutionStep];
+                // Find the full legal move with flags
+                MoveList legal;
+                ChessRules::generateLegal(m_board, legal);
+                bool matched = false;
+                for (uint8_t i = 0; i < legal.count; i++) {
+                    if (legal.moves[i].from == responseMove.from &&
+                        legal.moves[i].to == responseMove.to) {
+                        responseMove = legal.moves[i];
+                        matched = true;
+                        break;
+                    }
+                }
+                if (matched) {
+                    executeMove(responseMove);
+                }
+            }
+        }
     }
 
     // AI turn: two-phase approach so "Thinking..." renders before search blocks.
@@ -234,12 +279,76 @@ bool ChessScene::onInput(const InputEvent& event) {
     // Block input during move animation
     if (m_moveAnim.active) return true;
 
+    // Review mode navigation
+    if (m_uiState == UIState::Reviewing) {
+        if (event.key == Key::ESCAPE) {
+            exitReviewMode();
+            return true;
+        }
+        if (event.key == ',' || event.key == '<') {
+            if (m_reviewIndex > 0) reviewGoTo(m_reviewIndex - 1);
+            return true;
+        }
+        if (event.key == '.' || event.key == '>') {
+            if (m_reviewIndex < m_historyCount) reviewGoTo(m_reviewIndex + 1);
+            return true;
+        }
+        return true; // Block all other input in review mode
+    }
+
     // If a modal is visible, let it handle input
     if (m_promotionModal.isVisible() || m_gameOverModal.isVisible()) {
         return false;
     }
 
+    // Puzzle mode keys
+    if (m_puzzleMode) {
+        if (event.key == 'h' || event.key == 'H') {
+            // Hint: highlight solution source, then destination
+            if (m_puzzleSolutionStep < m_puzzleSolutionLen) {
+                const Move& sol = m_puzzleSolution[m_puzzleSolutionStep];
+                if (m_puzzleHintLevel == 0) {
+                    m_boardGrid.clearAllFlags();
+                    updateBoardHighlights();
+                    m_boardGrid.setHighlighted(toGridCol(sol.from.col), toGridRow(sol.from.row), true);
+                    m_boardGrid.markDirty();
+                    m_puzzleHintLevel = 1;
+                } else {
+                    m_boardGrid.setHighlighted(toGridCol(sol.to.col), toGridRow(sol.to.row), true);
+                    m_boardGrid.markDirty();
+                    m_puzzleHintLevel = 2;
+                }
+            }
+            return true;
+        }
+        if (event.key == 's' || event.key == 'S') {
+            // Skip to next puzzle
+            uint8_t next = m_puzzleIndex + 1;
+            if (next < puzzleCount()) {
+                setPuzzleMode(next);
+            } else {
+                clearPuzzleMode();
+                CardGFX::scenes().pop();
+            }
+            return true;
+        }
+        if (event.key == Key::ESCAPE) {
+            clearPuzzleMode();
+            CardGFX::scenes().pop();
+            return true;
+        }
+        // Block undo/new in puzzle mode — fall through to cell action only
+    }
+
     switch (event.key) {
+    case 'v':
+    case 'V':
+        if (m_historyCount > 0 && !m_aiThinking && !m_puzzleMode) {
+            enterReviewMode();
+            return true;
+        }
+        break;
+
     case 'u':
     case 'U':
         if (m_netMode != NetworkMode::Online) {
@@ -313,8 +422,9 @@ bool ChessScene::onInput(const InputEvent& event) {
 // ── Game Logic ────────────────────────────────────────────────────
 
 void ChessScene::newGame() {
-    m_board.reset();
     m_board.setVariant(m_variant);
+    m_board.setPositionIndex(m_positionIndex);
+    m_board.reset();
     m_uiState = UIState::SelectPiece;
     m_selectedSquare = NO_SQUARE;
     m_lastFrom = NO_SQUARE;
@@ -327,11 +437,11 @@ void ChessScene::newGame() {
     m_moveList.clearItems();
     m_boardGrid.clearAllFlags();
     // Start cursor on the human's king
-    uint8_t startRow = 0; // e1 (White's king) by default
+    uint8_t startRow = 0;
     if (m_aiDifficulty != AIDifficulty::None && m_aiColor == PieceColor::White) {
-        startRow = 7; // e8 (Black's king) — human is Black
+        startRow = 7;
     }
-    m_boardGrid.setCursor(toGridCol(4), toGridRow(startRow));
+    m_boardGrid.setCursor(toGridCol(m_board.initKingCol()), toGridRow(startRow));
     updateStatusBar();
     m_boardGrid.markDirty();
 
@@ -488,6 +598,19 @@ void ChessScene::executeMove(const Move& move) {
     m_lastTo = move.to;
     m_lastMoveWasExplosion = (m_variant == ChessVariant::Atomic && isCapture);
 
+    // Start timer after first move
+    if (!m_timerRunning && m_timeControl != TimeControl::None) {
+        m_timerRunning = true;
+    }
+    // Timer: add increment to the player who just moved
+    if (m_timeControl != TimeControl::None && m_timerRunning) {
+        auto params = getTimeControlParams(m_timeControl);
+        PieceColor movedSide = opponent(m_board.sideToMove());
+        uint32_t& movedTime = (movedSide == PieceColor::White)
+                              ? m_timeWhiteMs : m_timeBlackMs;
+        movedTime += params.incrementMs;
+    }
+
     // Send move to remote player (only if this was a local move)
     if (m_netMode == NetworkMode::Online && !m_applyingRemoteMove) {
         sendMove(move);
@@ -498,6 +621,75 @@ void ChessScene::executeMove(const Move& move) {
     addMoveToList(sanBuf);
     updateStatusBar();
     updateBoardHighlights();
+
+    // Puzzle mode: validate move against solution
+    if (m_puzzleMode && m_puzzleSolutionStep < m_puzzleSolutionLen) {
+        const Move& expected = m_puzzleSolution[m_puzzleSolutionStep];
+        if (move.from == expected.from && move.to == expected.to &&
+            (expected.promotion == PieceType::None || move.promotion == expected.promotion)) {
+            // Correct move
+            m_puzzleSolutionStep++;
+            m_puzzleHintLevel = 0;
+
+            if (m_puzzleSolutionStep >= m_puzzleSolutionLen) {
+                // Puzzle solved!
+                PuzzleStorage::markPuzzleCompleted(m_puzzleProgress, m_puzzleIndex);
+                PuzzleStorage::saveProgress(m_puzzleProgress);
+
+                m_gameOverModal.clearButtons();
+                m_gameOverModal.setTitle("Correct!");
+                char msg[32];
+                snprintf(msg, sizeof(msg), "Puzzle %d solved", m_puzzleIndex + 1);
+                m_gameOverModal.setMessage(msg);
+                m_gameOverModal.addButton("Next", [this]() {
+                    m_gameOverModal.hide();
+                    uint8_t next = m_puzzleIndex + 1;
+                    if (next < puzzleCount()) {
+                        setPuzzleMode(next);
+                    } else {
+                        clearPuzzleMode();
+                        CardGFX::scenes().pop();
+                    }
+                });
+                m_gameOverModal.addButton("Menu", [this]() {
+                    m_gameOverModal.hide();
+                    clearPuzzleMode();
+                    CardGFX::scenes().pop();
+                });
+                m_gameOverModal.show();
+                focusChain().focusWidget(&m_gameOverModal);
+                m_uiState = UIState::GameOver;
+            } else if (m_puzzleSolutionStep < m_puzzleSolutionLen) {
+                // More moves: auto-play opponent response after delay
+                m_puzzleAutoPlayPending = true;
+                m_puzzleAutoPlayDelay = 500;
+            }
+            return; // Skip normal game-end check and save
+        } else {
+            // Wrong move — cancel animation first, then undo
+            m_moveAnim.active = false;
+            if (m_historyCount > 0) {
+                m_historyCount--;
+                m_board.unmakeMove(m_history[m_historyCount]);
+            }
+            // Restore last-move highlights from history
+            if (m_historyCount > 0) {
+                m_lastFrom = m_history[m_historyCount - 1].move.from;
+                m_lastTo = m_history[m_historyCount - 1].move.to;
+            } else {
+                m_lastFrom = NO_SQUARE;
+                m_lastTo = NO_SQUARE;
+            }
+            m_lastMoveWasExplosion = false;
+            rebuildMoveList();
+            m_puzzleHintLevel = 0;
+            m_statusBar.setRight("Try again");
+            m_uiState = UIState::SelectPiece;
+            deselectPiece();
+            updateBoardHighlights();
+            return;
+        }
+    }
 
     // Check for game end
     checkGameEnd();
@@ -586,16 +778,29 @@ void ChessScene::updateStatusBar() {
         m_statusBar.setLeft(turn);
     }
 
-    // Center: move number + variant indicator + 50-move clock
+    // Center: timer display OR move number + variant indicator
     char moveBuf[32];
-    const char* varTag = (m_variant == ChessVariant::Atomic) ? " [A]" : "";
-    uint8_t fiftyClock = m_board.halfmoveClock() / 2;
-    if (fiftyClock > 0) {
-        snprintf(moveBuf, sizeof(moveBuf), "Move %d%s 50m:%d",
-                 m_board.fullmoveNumber(), varTag, fiftyClock);
+    if (m_timeControl != TimeControl::None) {
+        // Show both clocks
+        char wBuf[8], bBuf[8];
+        formatTime(wBuf, sizeof(wBuf), m_timeWhiteMs);
+        formatTime(bBuf, sizeof(bBuf), m_timeBlackMs);
+        bool whiteTurn = (m_board.sideToMove() == PieceColor::White);
+        snprintf(moveBuf, sizeof(moveBuf), "%s%s %s%s",
+                 whiteTurn ? ">" : " ", wBuf,
+                 whiteTurn ? " " : ">", bBuf);
     } else {
-        snprintf(moveBuf, sizeof(moveBuf), "Move %d%s",
-                 m_board.fullmoveNumber(), varTag);
+        const char* varTag = "";
+        if (m_variant == ChessVariant::Atomic) varTag = " [A]";
+        else if (m_variant == ChessVariant::Chess960) varTag = " [960]";
+        uint8_t fiftyClock = m_board.halfmoveClock() / 2;
+        if (fiftyClock > 0) {
+            snprintf(moveBuf, sizeof(moveBuf), "Move %d%s 50m:%d",
+                     m_board.fullmoveNumber(), varTag, fiftyClock);
+        } else {
+            snprintf(moveBuf, sizeof(moveBuf), "Move %d%s",
+                     m_board.fullmoveNumber(), varTag);
+        }
     }
     m_statusBar.setCenter(moveBuf);
 
@@ -750,10 +955,9 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
             CardGFX::scenes().pop(); // Back to lobby
         });
     }
-    m_gameOverModal.addButton("View", [this]() {
+    m_gameOverModal.addButton("Review", [this]() {
         m_gameOverModal.hide();
-        // Stay in GameOver state but let user view the board
-        focusChain().focusWidget(&m_boardGrid);
+        enterReviewMode();
     });
 
     m_gameOverModal.show();
@@ -939,6 +1143,8 @@ void ChessScene::rebuildMoveList() {
 
     // Replay all moves to rebuild the list text
     ChessBoard tempBoard;
+    tempBoard.setVariant(m_variant);
+    tempBoard.setPositionIndex(m_positionIndex);
     tempBoard.reset();
 
     for (uint8_t i = 0; i < m_historyCount; i++) {
@@ -982,7 +1188,9 @@ void ChessScene::saveGameState() {
                            m_historyOverflow,
                            m_aiDifficulty, m_aiColor,
                            m_localColor, m_boardFlipped,
-                           m_variant);
+                           m_variant, m_positionIndex,
+                           m_timeControl, m_timeWhiteMs,
+                           m_timeBlackMs, m_timerRunning);
 }
 
 bool ChessScene::loadSavedGame() {
@@ -992,15 +1200,26 @@ bool ChessScene::loadSavedGame() {
     uint8_t histCount;
     bool histOverflow;
     ChessVariant variant;
+    uint16_t posIndex;
+    TimeControl tc;
+    uint32_t twMs, tbMs;
+    bool timerRun;
 
     if (!ChessStorage::loadGame(m_board, m_history, histCount, histOverflow,
-                                aiDiff, aiCol, localCol, flipped, variant)) {
+                                aiDiff, aiCol, localCol, flipped, variant,
+                                posIndex, tc, twMs, tbMs, timerRun)) {
         return false;
     }
 
     // Restore mode state
     m_variant = variant;
+    m_positionIndex = posIndex;
     m_board.setVariant(variant);
+    m_board.setPositionIndex(posIndex);
+    m_timeControl = tc;
+    m_timeWhiteMs = twMs;
+    m_timeBlackMs = tbMs;
+    m_timerRunning = timerRun;
     m_aiDifficulty = aiDiff;
     m_aiColor = aiCol;
     m_aiThinking = false;
@@ -1042,12 +1261,123 @@ bool ChessScene::loadSavedGame() {
     if (!isNoSquare(m_lastTo)) {
         m_boardGrid.setCursor(toGridCol(m_lastTo.col), toGridRow(m_lastTo.row));
     } else {
-        uint8_t kingRow = (m_board.sideToMove() == PieceColor::White) ? 0 : 7;
-        m_boardGrid.setCursor(toGridCol(4), toGridRow(kingRow));
+        Square king = m_board.findKing(m_board.sideToMove());
+        if (!isNoSquare(king)) {
+            m_boardGrid.setCursor(toGridCol(king.col), toGridRow(king.row));
+        }
     }
 
     m_boardGrid.markDirty();
     return true;
+}
+
+// ── Review Mode ──────────────────────────────────────────────────────
+
+void ChessScene::enterReviewMode() {
+    m_preReviewState = m_uiState;
+    m_uiState = UIState::Reviewing;
+    m_reviewIndex = m_historyCount;
+    m_hintBar.setText("[</>] [ESC]");
+    m_movesLabel.setText("Review");
+    if (m_historyCount > 0) {
+        m_moveList.setSelected((m_reviewIndex - 1) / 2);
+    }
+    focusChain().focusWidget(&m_boardGrid);
+    updateStatusBar();
+}
+
+void ChessScene::exitReviewMode() {
+    // Restore board to final position
+    reviewGoTo(m_historyCount);
+    m_uiState = m_preReviewState;
+    m_movesLabel.setText("Moves");
+
+    if (m_preReviewState == UIState::GameOver) {
+        // Re-show game-over modal
+        checkGameEnd();
+    } else {
+        m_hintBar.setText(m_netMode == NetworkMode::Online ? "[R]esign" : "[U]ndo [N]ew");
+        focusChain().focusWidget(&m_boardGrid);
+    }
+    updateStatusBar();
+}
+
+void ChessScene::reviewGoTo(uint8_t index) {
+    m_reviewIndex = index;
+
+    // Replay from start to index
+    ChessBoard tempBoard;
+    tempBoard.setVariant(m_variant);
+    tempBoard.setPositionIndex(m_positionIndex);
+    tempBoard.reset();
+
+    for (uint8_t i = 0; i < index; i++) {
+        tempBoard.makeMove(m_history[i].move);
+    }
+
+    // Copy state to display board (preserve variant/960 config)
+    for (uint8_t r = 0; r < 8; r++) {
+        for (uint8_t c = 0; c < 8; c++) {
+            m_board.set(c, r, tempBoard.at(c, r));
+        }
+    }
+    m_board.setSideToMove(tempBoard.sideToMove());
+    m_board.setCastleRights(tempBoard.castleRights());
+    m_board.setEnPassantTarget(tempBoard.enPassantTarget());
+    m_board.setHalfmoveClock(tempBoard.halfmoveClock());
+    m_board.setFullmoveNumber(tempBoard.fullmoveNumber());
+
+    // Update last-move markers
+    if (index > 0) {
+        m_lastFrom = m_history[index - 1].move.from;
+        m_lastTo = m_history[index - 1].move.to;
+    } else {
+        m_lastFrom = NO_SQUARE;
+        m_lastTo = NO_SQUARE;
+    }
+
+    updateBoardHighlights();
+
+    // Update status bar with review position and eval
+    char leftBuf[24];
+    snprintf(leftBuf, sizeof(leftBuf), "Review %d/%d", index, m_historyCount);
+    m_statusBar.setLeft(leftBuf);
+
+    int16_t eval = ChessAI::evaluate(m_board);
+    // Convert to white-relative
+    if (m_board.sideToMove() == PieceColor::Black) eval = -eval;
+    char evalBuf[12];
+    if (eval > 9000) {
+        snprintf(evalBuf, sizeof(evalBuf), "M%d", (10001 - eval + 1) / 2);
+    } else if (eval < -9000) {
+        snprintf(evalBuf, sizeof(evalBuf), "-M%d", (10001 + eval + 1) / 2);
+    } else {
+        snprintf(evalBuf, sizeof(evalBuf), "%s%d.%02d",
+                 eval >= 0 ? "+" : "", eval / 100,
+                 (eval >= 0 ? eval : -eval) % 100);
+    }
+    m_statusBar.setRight(evalBuf);
+
+    // Highlight current move in list
+    if (index > 0) {
+        m_moveList.setSelected((index - 1) / 2);
+    }
+
+    m_boardGrid.markDirty();
+}
+
+// ── Timer Helpers ────────────────────────────────────────────────────
+
+void ChessScene::formatTime(char* buf, uint8_t bufLen, uint32_t ms) {
+    uint32_t totalSec = ms / 1000;
+    if (totalSec >= 60) {
+        uint32_t min = totalSec / 60;
+        uint32_t sec = totalSec % 60;
+        snprintf(buf, bufLen, "%d:%02d", (int)min, (int)sec);
+    } else {
+        uint32_t tenths = (ms % 1000) / 100;
+        snprintf(buf, bufLen, "%d.%d", (int)totalSec, (int)tenths);
+    }
 }
 
 // ── Variant ──────────────────────────────────────────────────────────
@@ -1055,6 +1385,89 @@ bool ChessScene::loadSavedGame() {
 void ChessScene::setVariant(ChessVariant v) {
     m_variant = v;
     m_board.setVariant(v);
+}
+
+void ChessScene::setPositionIndex(uint16_t idx) {
+    m_positionIndex = idx;
+    m_board.setPositionIndex(idx);
+}
+
+void ChessScene::setTimeControl(TimeControl tc) {
+    m_timeControl = tc;
+    if (tc != TimeControl::None) {
+        auto params = getTimeControlParams(tc);
+        m_timeWhiteMs = params.initialMs;
+        m_timeBlackMs = params.initialMs;
+    } else {
+        m_timeWhiteMs = 0;
+        m_timeBlackMs = 0;
+    }
+    m_timerRunning = false;
+}
+
+// ── Puzzle Mode ──────────────────────────────────────────────────────
+
+// External function from puzzle_data.cpp
+extern void loadPuzzleIntoBoard(uint16_t index, ChessBoard& board, Move* solution,
+                                uint8_t& solutionLen, PuzzleType& type, uint8_t& rating);
+
+void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
+    m_puzzleMode = true;
+    m_puzzleIndex = puzzleIndex;
+    m_puzzleSolutionStep = 0;
+    m_puzzleHintLevel = 0;
+    m_puzzleAutoPlayPending = false;
+
+    // Load puzzle
+    PuzzleType ptype;
+    uint8_t prating;
+    loadPuzzleIntoBoard(puzzleIndex, m_board, m_puzzleSolution,
+                        m_puzzleSolutionLen, ptype, prating);
+
+    // Load progress
+    PuzzleStorage::loadProgress(m_puzzleProgress);
+
+    // Set up UI
+    m_uiState = UIState::SelectPiece;
+    m_selectedSquare = NO_SQUARE;
+    m_lastFrom = NO_SQUARE;
+    m_lastTo = NO_SQUARE;
+    m_historyCount = 0;
+    m_historyOverflow = false;
+    m_legalMoves.clear();
+    m_moveList.clearItems();
+    m_boardGrid.clearAllFlags();
+    m_moveAnim.active = false;
+
+    // Flip board if Black to move
+    m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
+
+    // Position cursor on center
+    Square king = m_board.findKing(m_board.sideToMove());
+    if (!isNoSquare(king)) {
+        m_boardGrid.setCursor(toGridCol(king.col), toGridRow(king.row));
+    }
+
+    // Status bar
+    const char* typeStr = "Puzzle";
+    if (ptype == PuzzleType::MateIn1) typeStr = "Mate in 1";
+    else if (ptype == PuzzleType::MateIn2) typeStr = "Mate in 2";
+    else if (ptype == PuzzleType::Tactic) typeStr = "Tactic";
+    m_statusBar.setLeft(typeStr);
+
+    char centerBuf[24];
+    snprintf(centerBuf, sizeof(centerBuf), "#%d  R:%d", puzzleIndex + 1, prating);
+    m_statusBar.setCenter(centerBuf);
+    m_statusBar.setRight("");
+
+    m_hintBar.setText("[H]int [S]kip");
+    m_movesLabel.setText("Puzzle");
+    m_boardGrid.markDirty();
+}
+
+void ChessScene::clearPuzzleMode() {
+    m_puzzleMode = false;
+    m_puzzleAutoPlayPending = false;
 }
 
 // ── AI Mode ──────────────────────────────────────────────────────────
@@ -1196,7 +1609,7 @@ void ChessScene::pollNetwork() {
 
     // Check for connection timeout (3 seconds without any packet)
     if (!m_disconnectShown && transport.msSinceLastReceive() > 3000 &&
-        m_uiState != UIState::GameOver) {
+        m_uiState != UIState::GameOver && now >= m_disconnectGraceUntil) {
         onConnectionLost();
     }
 }
@@ -1237,6 +1650,13 @@ void ChessScene::onConnectionLost() {
     m_gameOverModal.addButton("Wait", [this]() {
         m_gameOverModal.hide();
         m_disconnectShown = false;
+        m_disconnectGraceUntil = millis() + 5000; // 5s grace before re-checking
+        // Resume retransmission of pending move if one was lost
+        if (m_lastSentSeq >= m_historyCount - 1 && m_historyCount > 0) {
+            m_awaitingAck = true;
+            m_retryCount = 0;
+            m_lastSendTime = millis();
+        }
         focusChain().focusWidget(&m_boardGrid);
     });
     m_gameOverModal.addButton("Quit", [this]() {

@@ -1,4 +1,5 @@
 #include "chess_ai.h"
+#include "chess_opening_book.h"
 #include <Arduino.h>
 #include <esp_random.h>
 
@@ -333,6 +334,14 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha, int16_t be
 // ── Public API ───────────────────────────────────────────────────────
 
 Move ChessAI::findBestMove(ChessBoard& board, AIDifficulty difficulty) {
+    // Try opening book first (Standard variant only)
+    if (board.variant() == ChessVariant::Standard) {
+        Move bookMove;
+        if (ChessOpeningBook::probe(board, bookMove)) {
+            return bookMove;
+        }
+    }
+
     int maxDepth;
     uint32_t maxTimeMs;
 
