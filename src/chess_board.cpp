@@ -161,7 +161,8 @@ MoveRecord ChessBoard::makeMove(const Move& move) {
             int8_t nr = (int8_t)move.to.row + ATOMIC_OFFS[i][1];
             if (nc >= 0 && nc < 8 && nr >= 0 && nr < 8) {
                 Piece neighbor = at(nc, nr);
-                if (!neighbor.empty()) {
+                // Pawns are immune to explosion splash damage (atomic rule)
+                if (!neighbor.empty() && neighbor.type != PieceType::Pawn) {
                     record.exploded[i] = neighbor;
                     record.explodedMask |= (1 << i);
                     set(nc, nr, Piece{});

@@ -89,6 +89,20 @@ bool isAttacked(const ChessBoard& board, uint8_t col, uint8_t row, PieceColor by
 bool isInCheck(const ChessBoard& board, PieceColor c) {
     Square king = board.findKing(c);
     if (isNoSquare(king)) return false;
+
+    // Atomic: adjacent kings nullify check (no piece can capture near
+    // either king without exploding both, so check is impossible)
+    if (board.variant() == ChessVariant::Atomic) {
+        Square enemyKing = board.findKing(opponent(c));
+        if (!isNoSquare(enemyKing)) {
+            int8_t dc = (int8_t)king.col - (int8_t)enemyKing.col;
+            int8_t dr = (int8_t)king.row - (int8_t)enemyKing.row;
+            if (dc >= -1 && dc <= 1 && dr >= -1 && dr <= 1) {
+                return false;
+            }
+        }
+    }
+
     return isAttacked(board, king.col, king.row, opponent(c));
 }
 
