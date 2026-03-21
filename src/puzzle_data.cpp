@@ -47,18 +47,21 @@ static const SimplePuzzle SIMPLE_PUZZLES[] = {
      0, PuzzleType::MateIn1, 50, 1, {{3,0, 3,7}}},
 
     // 1: Queen back rank mate. Qd1-d8#
-    // W: Qd1(3,0) Rf1(5,0) Kg1(6,0). B: Rf8(5,7) Kg8(6,7) pa7 pb7 pg7 ph7.
-    {"...Q.RK." "........" "........" "........" "........" "........" "pp....pp" ".....rk.",
+    // W: Qd1(3,0) Rf1(5,0) Kg1(6,0). B: Kg8(6,7) pa7 pb7 pg7 ph7.
+    // Rf1 covers f-file (f7,f8). Queen covers rank 8. Pawns box in king.
+    {"...Q.RK." "........" "........" "........" "........" "........" "pp....pp" "......k.",
      0, PuzzleType::MateIn1, 45, 1, {{3,0, 3,7}}},
 
-    // 2: Arabian mate. Rh7-h8# with Nf6 guarding g8.
-    // W: Kg1(6,0) Nf6(5,5) Rh7(7,6). B: Kg8(6,7).
-    {"......K." "........" "........" "........" "........" ".....N.." ".......R" "......k.",
+    // 2: Arabian mate. Rh7-h8# with Nf6 guarding g8/h7.
+    // W: Kg1(6,0) Nf6(5,5) Rh7(7,6). B: Kg8(6,7) pf7(5,6) pg7(6,6).
+    // Pawns on f7,g7 block escape. Nf6 covers g8 and h7. Rh8 covers rank 8.
+    {"......K." "........" "........" "........" "........" ".....N.." ".....ppR" "......k.",
      0, PuzzleType::MateIn1, 60, 1, {{7,6, 7,7}}},
 
     // 3: Rook delivers Ra1-a8# with King covering escape.
-    // W: Ra1(0,0) Kf6(5,5). B: Kh8(7,7).
-    {"R......." "........" "........" "........" "........" ".....K.." "........" ".......k",
+    // W: Ra1(0,0) Kf6(5,5). B: Kh8(7,7) ph7(7,6).
+    // Ra8 covers rank 8 (g8). Kf6 covers g7. ph7 blocks h7.
+    {"R......." "........" "........" "........" "........" ".....K.." ".......p" ".......k",
      0, PuzzleType::MateIn1, 55, 1, {{0,0, 0,7}}},
 
     // 4: Queen captures mate. Qf6xg7#
@@ -81,32 +84,66 @@ static const SimplePuzzle SIMPLE_PUZZLES[] = {
     {"..K....." "........" "........" "........" "........" "R......." ".R......" "...k....",
      0, PuzzleType::MateIn1, 40, 1, {{0,5, 0,7}}},
 
-    // 8: Pawn promotion mate. e7-e8=Q#. Kf6 covers escape.
-    // W: Kf6(5,5) Pe7(4,6). B: Ke8(4,7).
-    {"........" "........" "........" "........" "........" ".....K.." "....P..." "....k...",
-     0, PuzzleType::MateIn1, 70, 1, {{4,6, 4,7, PieceType::Queen}}},
+    // 8: Pawn promotion mate. c7-c8=Q#. Kb6 covers escape.
+    // W: Kb6(1,5) Pc7(2,6). B: Ka8(0,7).
+    // c8=Q checks along rank 8. Kb6 covers a7 and b7.
+    {"........" "........" "........" "........" "........" ".K......" "..P....." "k.......",
+     0, PuzzleType::MateIn1, 70, 1, {{2,6, 2,7, PieceType::Queen}}},
 
     // 9: Queen mate on g1. Qg3-g1#.
     // W: Ka1(0,0) Qg3(6,2). B: Kh1(7,0) ph2(7,1).
     {"K......k" ".......p" "......Q." "........" "........" "........" "........" "........",
      0, PuzzleType::MateIn1, 55, 1, {{6,2, 6,0}}},
 
-    // ── Tactics (10-11) ──────────────────────────────────────
+    // ── Mate in 1 (10-11) ────────────────────────────────────
 
-    // 10: Knight fork. Nd4-e6 forks Kg7 and Qc5.
+    // 10: Knight smothered mate. Ne5-g6#. King boxed in by own pieces.
+    // W: Kg1(6,0) Ne5(4,4). B: Kh8(7,7) Rg8(6,7) pg7(6,6) ph7(7,6).
+    // Ng6 checks h8. Rg8 blocks g8, pg7 blocks g7, ph7 blocks h7. Rg8 can't capture (pg7 blocks).
+    {"......K." "........" "........" "........" "....N..." "........" "......pp" "......rk",
+     0, PuzzleType::MateIn1, 65, 1, {{4,4, 6,5}}},
+
+    // 11: Queen captures pawn for mate. Qf6xg7#.
+    // W: Kg1(6,0) Qf6(5,5). B: Kg8(6,7) Rf8(5,7) pd7(3,6) pg7(6,6) ph7(7,6).
+    {"......K." "........" "........" "........" "........" ".....Q.." "...p..pp" ".....rk.",
+     0, PuzzleType::MateIn1, 55, 1, {{5,5, 6,6}}},
+
+    // ── Mate in 2 (12-14) ─────────────────────────────────────
+
+    // 12: Rook sacrifice + sliding mate. Rd1xd8+ Kh7 Rd8-h8#.
+    // W: Kg1(6,0) Pf5(5,4) Rd1(3,0). B: Kg8(6,7) Rd8(3,7) pf7(5,6) pg7(6,6).
+    // After Rxd8+ Kh7 forced (f7,g7=pawns, f8/h8=rank 8). Rh8# with Pf5 covering g6.
+    {"...R..K." "........" "........" "........" ".....P.." "........" ".....pp." "...r..k.",
+     0, PuzzleType::MateIn2, 60, 3, {{3,0, 3,7}, {6,7, 7,6}, {3,7, 7,7}}},
+
+    // 13: Rook sacrifice + queen mate. Rc1xc8+ Kh7 Qe2-h5#.
+    // W: Kg1(6,0) Qe2(4,1) Rc1(2,0). B: Kg8(6,7) Rc8(2,7) pf7(5,6) pg7(6,6).
+    // After Rxc8+ Kh7 forced. Qh5# with Rc8 covering rank 8, Qh5 covering g6/h6.
+    {"..R...K." "....Q..." "........" "........" "........" "........" ".....pp." "..r...k.",
+     0, PuzzleType::MateIn2, 65, 3, {{2,0, 2,7}, {6,7, 7,6}, {4,1, 7,4}}},
+
+    // 14: Knight check + queen capture mate. Nf5-h6+ Kh8 Qa1xg7#.
+    // W: Kg1(6,0) Qa1(0,0) Nf5(5,4). B: Kg8(6,7) Rf8(5,7) pf7(5,6) pg7(6,6) ph7(7,6).
+    // Nh6+ forces Kh8 (f8=rook, h7=pawn, g7=pawn). Qxg7# via a1-g7 diagonal.
+    {"Q.....K." "........" "........" "........" ".....N.." "........" ".....ppp" ".....rk.",
+     0, PuzzleType::MateIn2, 70, 3, {{5,4, 7,5}, {6,7, 7,7}, {0,0, 6,6}}},
+
+    // ── Tactics (15-17) ────────────────────────────────────────
+
+    // 15: Knight fork. Nd4-e6 forks Kg7 and Qc5.
     // W: Kg1(6,0) Nd4(3,3). B: Kg7(6,6) Qc5(2,4).
     {"......K." "........" "........" "...N...." "..q....." "........" "......k." "........",
      0, PuzzleType::Tactic, 55, 1, {{3,3, 4,5}}},
 
-    // 11: Pin wins piece. Bg5 pins Nf6 to Qd8. Capture Bxf6 wins knight.
+    // 16: Pin wins piece. Bg5 pins Nf6 to Qd8. Bxf6 wins knight.
     // W: Kg1(6,0) Bg5(6,4). B: Ke8(4,7) Nf6(5,5) Qd8(3,7).
     {"......K." "........" "........" "........" "......B." ".....n.." "........" "...qk...",
-     // Wait: Bg5 is (6,4). Nf6 is (5,5). If B captures f6, Bxf6, Q recaptures? No — B pins N to Q.
-     // The B on g5 attacks f6. The N on f6 shields the K on e8... wait, B goes diagonal.
-     // g5-f6-e7-d8: yes! B on g5 pins N on f6 to Q on d8 (through e7 which is empty).
-     // Actually Bg5-f6 is one square diagonal. Then f6-e7-d8. So if Bxf6, Qxf6? No, Q is on d8.
-     // The pin means N can't move. So Bxf6 wins the knight for free.
      0, PuzzleType::Tactic, 60, 1, {{6,4, 5,5}}},
+
+    // 17: Knight fork. Ne4-f6+ forks Kg8 and Qd5.
+    // W: Kg1(6,0) Ne4(4,3). B: Kg8(6,7) Qd5(3,4) Rf8(5,7) ph7(7,6).
+    {"......K." "........" "........" "....N..." "...q...." "........" ".......p" ".....rk.",
+     0, PuzzleType::Tactic, 55, 1, {{4,3, 5,5}}},
 };
 
 static constexpr uint16_t NUM_PUZZLES = sizeof(SIMPLE_PUZZLES) / sizeof(SIMPLE_PUZZLES[0]);

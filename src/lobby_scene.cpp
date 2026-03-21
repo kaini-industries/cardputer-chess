@@ -596,27 +596,38 @@ void LobbyScene::showPuzzleMenu() {
         if (total > 0) startPuzzle(0);
     });
 
-    // Categories
-    char m1Buf[16], m2Buf[16], tBuf[16];
-    snprintf(m1Buf, sizeof(m1Buf), "Mate1 (%d)", puzzleCountByType(PuzzleType::MateIn1));
-    snprintf(m2Buf, sizeof(m2Buf), "Mate2 (%d)", puzzleCountByType(PuzzleType::MateIn2));
-    snprintf(tBuf, sizeof(tBuf), "Tactic (%d)", puzzleCountByType(PuzzleType::Tactic));
+    // Categories — only show types that have puzzles
+    uint16_t m1Count = puzzleCountByType(PuzzleType::MateIn1);
+    uint16_t m2Count = puzzleCountByType(PuzzleType::MateIn2);
+    uint16_t tCount  = puzzleCountByType(PuzzleType::Tactic);
 
-    m_menuModal.addButton(m1Buf, [this]() {
-        m_menuModal.hide();
-        uint16_t idx = puzzleIndexByType(PuzzleType::MateIn1, 0);
-        if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
-    });
-    m_menuModal.addButton(m2Buf, [this]() {
-        m_menuModal.hide();
-        uint16_t idx = puzzleIndexByType(PuzzleType::MateIn2, 0);
-        if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
-    });
-    m_menuModal.addButton(tBuf, [this]() {
-        m_menuModal.hide();
-        uint16_t idx = puzzleIndexByType(PuzzleType::Tactic, 0);
-        if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
-    });
+    if (m1Count > 0) {
+        char m1Buf[16];
+        snprintf(m1Buf, sizeof(m1Buf), "Mate1 (%d)", m1Count);
+        m_menuModal.addButton(m1Buf, [this]() {
+            m_menuModal.hide();
+            uint16_t idx = puzzleIndexByType(PuzzleType::MateIn1, 0);
+            if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
+        });
+    }
+    if (m2Count > 0) {
+        char m2Buf[16];
+        snprintf(m2Buf, sizeof(m2Buf), "Mate2 (%d)", m2Count);
+        m_menuModal.addButton(m2Buf, [this]() {
+            m_menuModal.hide();
+            uint16_t idx = puzzleIndexByType(PuzzleType::MateIn2, 0);
+            if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
+        });
+    }
+    if (tCount > 0) {
+        char tBuf[16];
+        snprintf(tBuf, sizeof(tBuf), "Tactic (%d)", tCount);
+        m_menuModal.addButton(tBuf, [this]() {
+            m_menuModal.hide();
+            uint16_t idx = puzzleIndexByType(PuzzleType::Tactic, 0);
+            if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
+        });
+    }
     m_menuModal.addButton("Back", [this]() {
         m_menuModal.hide();
         showMenu();
