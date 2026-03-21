@@ -1,8 +1,9 @@
 """
-Post-build script: produces two release binaries after `pio run -e m5stack-cores3`:
+Post-build script for `pio run -e m5stack-cores3`. Produces release artifacts:
 
   firmware/cardputer-chess-<ver>-m5-burner.bin  — merged (M5Burner, flash at 0x0)
   firmware/cardputer-chess-<ver>-app.bin        — app only (launcher/manual, flash at 0x10000)
+  bin/m5stack-cores3/firmware.bin               — raw firmware for GitHub release
 """
 Import("env")
 
@@ -50,6 +51,13 @@ def merge_bin(source, target, env):
     shutil.copy2(firmware, app_path)
     app_kb = os.path.getsize(app_path) / 1024
     print(f"App-only binary ready: {app_path} ({app_kb:.0f} KB)")
+
+    # Copy raw firmware to bin/ for release artifact
+    bin_dir = os.path.join(env.subst("$PROJECT_DIR"), "bin", "m5stack-cores3")
+    os.makedirs(bin_dir, exist_ok=True)
+    bin_path = os.path.join(bin_dir, "firmware.bin")
+    shutil.copy2(firmware, bin_path)
+    print(f"Raw firmware staged: {bin_path} ({app_kb:.0f} KB)")
 
 
 env.AddPostAction("$BUILD_DIR/firmware.bin", merge_bin)

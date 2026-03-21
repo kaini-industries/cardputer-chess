@@ -174,20 +174,6 @@ pio device monitor
 
 The build automatically generates a merged M5Burner-compatible binary at `firmware/cardputer-chess-<version>.bin`.
 
-## Testing
-
-The project includes a CardGFX framework test suite that runs on-device:
-
-```bash
-# Build and upload tests
-pio run -e test-cardputer --target upload
-
-# View results on serial monitor
-pio device monitor
-```
-
-Tests cover focus management, widget rendering, scene lifecycle, and widget functionality. After automated tests complete, interactive visual diagnostics are available (press **N**/**P** to navigate, **Esc** to exit).
-
 ## Project Structure
 
 ```
@@ -208,12 +194,9 @@ Tests cover focus management, widget rendering, scene lifecycle, and widget func
 │   ├── puzzle_data.h/.cpp      # Embedded puzzle database
 │   └── puzzle_storage.h/.cpp   # Puzzle progress persistence
 ├── lib/
-│   ├── cardgfx/                # CardGFX UI framework (see its README)
-│   └── cardgfx_test/           # CardGFX test suite
-├── test/
-│   └── test_main.cpp           # Test runner entry point
+│   └── cardgfx/                # CardGFX UI framework (see its README)
 ├── firmware/                   # M5Burner merged binaries (build artifact)
-├── generate_m5burner_bin.py    # Post-build script for M5Burner binary
+├── post_build.py               # Post-build script (M5Burner binary, release staging)
 ├── inject_version.py           # Build script to inject firmware version
 ├── platformio.ini              # Build configuration
 └── README.md
