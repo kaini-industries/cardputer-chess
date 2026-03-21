@@ -55,7 +55,6 @@ private:
     // Last move (for marked squares)
     Square m_lastFrom = NO_SQUARE;
     Square m_lastTo   = NO_SQUARE;
-    bool   m_lastMoveWasExplosion = false; // Atomic: last move caused explosion
 
     // Move history (for undo)
     static constexpr uint8_t MAX_HISTORY = 250;

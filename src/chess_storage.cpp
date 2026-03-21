@@ -4,8 +4,8 @@
 
 // ─── Binary Save Format ──────────────────────────────────────────────
 //
-// Version 3 layout (extends v2 with 960 position and timer):
-//   [0]       version (0x03)
+// Version 4 layout (removed atomic explosion data from v3):
+//   [0]       version (0x04)
 //   [1..64]   board squares — 1 byte each: (type << 4) | (color << 0)
 //   [65]      sideToMove
 //   [66]      castleRights
@@ -24,9 +24,9 @@
 //   [82..85]  timeWhiteMs (little-endian uint32)
 //   [86..89]  timeBlackMs (little-endian uint32)
 //   [90]      timerRunning
-//   [91..]    history records (33 bytes each)
+//   [91..]    history records (16 bytes each)
 //
-// Each MoveRecord packed as 33 bytes:
+// Each MoveRecord packed as 16 bytes:
 //   [0]  from.col, [1]  from.row
 //   [2]  to.col,   [3]  to.row
 //   [4]  promotion (PieceType)
@@ -37,13 +37,12 @@
 //   [11] prevHalfmoveClock
 //   [12] prevEnPassantTarget.col, [13] prevEnPassantTarget.row
 //   [14] movedPiece type, [15] movedPiece color
-//   [16..31] exploded[0..7] — 2 bytes each (type, color)
-//   [32] explodedMask
 
 static constexpr uint8_t SAVE_VERSION_V1 = 0x01;
 static constexpr uint8_t SAVE_VERSION_V2 = 0x02;
 static constexpr uint8_t SAVE_VERSION_V3 = 0x03;
-static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V3;
+static constexpr uint8_t SAVE_VERSION_V4 = 0x04;
+static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V4;
 
 static constexpr size_t HEADER_SIZE_V1 = 78;
 static constexpr size_t RECORD_SIZE_V1 = 14;
@@ -51,8 +50,11 @@ static constexpr size_t RECORD_SIZE_V1 = 14;
 static constexpr size_t HEADER_SIZE_V2 = 79;
 static constexpr size_t RECORD_SIZE_V2 = 33;
 
+static constexpr size_t HEADER_SIZE_V3 = 91;
+static constexpr size_t RECORD_SIZE_V3 = 33;
+
 static constexpr size_t HEADER_SIZE = 91;
-static constexpr size_t RECORD_SIZE = 33;
+static constexpr size_t RECORD_SIZE = 16;
 
 static constexpr const char* NVS_NAMESPACE = "chess";
 static constexpr const char* NVS_KEY = "game";
@@ -76,11 +78,6 @@ static void packRecord(uint8_t* dst, const MoveRecord& rec) {
     dst[13] = rec.prevEnPassantTarget.row;
     dst[14] = static_cast<uint8_t>(rec.movedPiece.type);
     dst[15] = static_cast<uint8_t>(rec.movedPiece.color);
-    for (int i = 0; i < 8; i++) {
-        dst[16 + i * 2]     = static_cast<uint8_t>(rec.exploded[i].type);
-        dst[16 + i * 2 + 1] = static_cast<uint8_t>(rec.exploded[i].color);
-    }
-    dst[32] = rec.explodedMask;
 }
 
 static void unpackRecord(const uint8_t* src, MoveRecord& rec) {
@@ -97,11 +94,6 @@ static void unpackRecord(const uint8_t* src, MoveRecord& rec) {
     rec.prevEnPassantTarget = makeSquare(src[12], src[13]);
     rec.movedPiece = Piece(static_cast<PieceType>(src[14]),
                            static_cast<PieceColor>(src[15]));
-    for (int i = 0; i < 8; i++) {
-        rec.exploded[i] = Piece(static_cast<PieceType>(src[16 + i * 2]),
-                                static_cast<PieceColor>(src[16 + i * 2 + 1]));
-    }
-    rec.explodedMask = src[32];
 }
 
 // V1 unpacker for backward compatibility
@@ -118,7 +110,6 @@ static void unpackRecordV1(const uint8_t* src, MoveRecord& rec) {
     rec.prevHalfmoveClock = src[11];
     rec.prevEnPassantTarget = makeSquare(src[12], src[13]);
     rec.movedPiece = Piece{}; // Not stored in v1
-    rec.explodedMask = 0;    // No atomic data in v1
 }
 
 static inline void writeU16LE(uint8_t* dst, uint16_t val) {
@@ -228,7 +219,7 @@ bool loadGame(ChessBoard& board,
 
     uint8_t version = buf[0];
     if (version != SAVE_VERSION_V1 && version != SAVE_VERSION_V2 &&
-        version != SAVE_VERSION_V3) {
+        version != SAVE_VERSION_V3 && version != SAVE_VERSION_V4) {
         delete[] buf;
         return false;
     }
@@ -251,6 +242,7 @@ bool loadGame(ChessBoard& board,
     board.setFullmoveNumber(readU16LE(buf + 70));
 
     historyCount = buf[72];
+    if (historyCount > 250) historyCount = 250; // Clamp to MAX_HISTORY
     historyOverflow = (buf[73] & 0x01) != 0;
     aiDifficulty = static_cast<AIDifficulty>(buf[74]);
     aiColor = static_cast<PieceColor>(buf[75]);
@@ -259,7 +251,20 @@ bool loadGame(ChessBoard& board,
 
     // Variant (v2+)
     if (version >= SAVE_VERSION_V2) {
-        variant = static_cast<ChessVariant>(buf[78]);
+        uint8_t rawVariant = buf[78];
+        // Reject saves from removed variants (Atomic was 1 in old enum)
+        // In v1-v3, Chess960 was 2; in v4+, Chess960 is 1
+        if (version < SAVE_VERSION_V4 && rawVariant == 1) {
+            // Old Atomic save — cannot load
+            delete[] buf;
+            return false;
+        }
+        if (version < SAVE_VERSION_V4 && rawVariant == 2) {
+            // Old Chess960 (was enum value 2, now 1)
+            variant = ChessVariant::Chess960;
+        } else {
+            variant = static_cast<ChessVariant>(rawVariant);
+        }
     } else {
         variant = ChessVariant::Standard;
     }
@@ -281,9 +286,12 @@ bool loadGame(ChessBoard& board,
 
     // Determine record layout based on version
     size_t headerSize, recordSize;
-    if (version >= SAVE_VERSION_V3) {
+    if (version >= SAVE_VERSION_V4) {
         headerSize = HEADER_SIZE;
         recordSize = RECORD_SIZE;
+    } else if (version == SAVE_VERSION_V3) {
+        headerSize = HEADER_SIZE_V3;
+        recordSize = RECORD_SIZE_V3;
     } else if (version == SAVE_VERSION_V2) {
         headerSize = HEADER_SIZE_V2;
         recordSize = RECORD_SIZE_V2;

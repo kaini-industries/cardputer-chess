@@ -8,6 +8,29 @@
 #include <cstdio>
 #include <cstring>
 
+// ── Name helpers for host list labels ────────────────────────────────
+
+static const char* variantShortName(ChessVariant v) {
+    switch (v) {
+        case ChessVariant::Chess960: return "960";
+        default:                     return "Std";
+    }
+}
+
+static const char* timeControlShortName(TimeControl tc) {
+    switch (tc) {
+        case TimeControl::Bullet1: return "1+0";
+        case TimeControl::Blitz3:  return "3+2";
+        case TimeControl::Blitz5:  return "5+3";
+        case TimeControl::Rapid10: return "10+0";
+        default:                   return "No Timer";
+    }
+}
+
+static void formatMacSuffix(const uint8_t mac[6], char* out) {
+    snprintf(out, 6, "%02X:%02X", mac[4], mac[5]);
+}
+
 // =====================================================================
 // LobbyScene Implementation
 // =====================================================================
@@ -125,12 +148,6 @@ void LobbyScene::showVariantMenu() {
 
     m_menuModal.addButton("Standard", [this]() {
         m_selectedVariant = ChessVariant::Standard;
-        m_positionIndex = 518;
-        m_menuModal.hide();
-        onVariantSelected();
-    });
-    m_menuModal.addButton("Atomic", [this]() {
-        m_selectedVariant = ChessVariant::Atomic;
         m_positionIndex = 518;
         m_menuModal.hide();
         onVariantSelected();
@@ -299,7 +316,11 @@ void LobbyScene::startHosting() {
     m_lastBroadcast = 0;
     m_stateStartTime = millis();
 
-    m_statusBar.setLeft("Hosting");
+    char hostLabel[16];
+    char macStr[6];
+    formatMacSuffix(transport.ownMac(), macStr);
+    snprintf(hostLabel, sizeof(hostLabel), "Hosting [%s]", macStr);
+    m_statusBar.setLeft(hostLabel);
     m_statusBar.setRight("ESC=Back");
     m_statusLabel.setText("Waiting for opponent...");
 }
@@ -316,10 +337,76 @@ void LobbyScene::startJoining() {
         return;
     }
 
+    m_hostCount = 0;
+    m_hostListDirty = false;
+    m_connecting = false;
     m_stateStartTime = millis();
-    m_statusBar.setLeft("Joining");
+    m_statusBar.setLeft("Join");
     m_statusBar.setRight("ESC=Back");
     m_statusLabel.setText("Searching for host...");
+}
+
+void LobbyScene::connectToHost(uint8_t hostIdx) {
+    if (hostIdx >= m_hostCount) return;
+    auto& host = m_hosts[hostIdx];
+    auto& transport = EspNowTransport::instance();
+
+    m_gameId = host.gameId;
+    m_selectedVariant = host.variant;
+    m_positionIndex = host.positionIndex;
+    m_selectedTimeControl = host.timeControl;
+    memcpy(m_peerMac, host.mac, 6);
+    transport.addPeer(host.mac);
+
+    AcceptGameMsg accept;
+    accept.gameId = m_gameId;
+    transport.send(
+        reinterpret_cast<const uint8_t*>(&accept), sizeof(accept));
+
+    m_menuModal.hide();
+    m_connecting = true;
+    m_statusLabel.setText("Connecting...");
+}
+
+void LobbyScene::rebuildHostList() {
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Join Game");
+    m_menuModal.setEscapeCallback([this]() {
+        m_menuModal.hide();
+        cancelPairing();
+    });
+
+    if (m_hostCount == 0) {
+        m_menuModal.setMessage("Searching for hosts...");
+    } else {
+        char msgBuf[24];
+        snprintf(msgBuf, sizeof(msgBuf), "%d host%s found",
+                 m_hostCount, m_hostCount == 1 ? "" : "s");
+        m_menuModal.setMessage(msgBuf);
+    }
+
+    for (uint8_t i = 0; i < m_hostCount; i++) {
+        char label[32];
+        char macStr[6];
+        formatMacSuffix(m_hosts[i].mac, macStr);
+        snprintf(label, sizeof(label), "%s %s %s",
+                 macStr,
+                 variantShortName(m_hosts[i].variant),
+                 timeControlShortName(m_hosts[i].timeControl));
+        uint8_t idx = i; // capture by value
+        m_menuModal.addButton(label, [this, idx]() {
+            connectToHost(idx);
+        });
+    }
+
+    m_menuModal.addButton("Back", [this]() {
+        m_menuModal.hide();
+        cancelPairing();
+    });
+
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+    m_hostListDirty = false;
 }
 
 void LobbyScene::cancelPairing() {
@@ -397,19 +484,30 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 memcpy(&disc, buf, sizeof(DiscoveryMsg));
 
                 if (disc.version == NET_PROTOCOL_VERSION) {
-                    m_gameId = disc.gameId;
-                    m_selectedVariant = static_cast<ChessVariant>(disc.variant);
-                    m_positionIndex = disc.positionIndex;
-                    m_selectedTimeControl = static_cast<TimeControl>(disc.timeControl);
-                    memcpy(m_peerMac, mac, 6);
-                    transport.addPeer(mac);
-
-                    AcceptGameMsg accept;
-                    accept.gameId = m_gameId;
-                    transport.send(
-                        reinterpret_cast<const uint8_t*>(&accept), sizeof(accept));
-
-                    m_statusLabel.setText("Connecting...");
+                    // Check if this host is already known (by gameId)
+                    bool found = false;
+                    for (uint8_t i = 0; i < m_hostCount; i++) {
+                        if (m_hosts[i].gameId == disc.gameId) {
+                            m_hosts[i].lastSeen = now;
+                            // Update in case host changed settings
+                            m_hosts[i].variant = static_cast<ChessVariant>(disc.variant);
+                            m_hosts[i].positionIndex = disc.positionIndex;
+                            m_hosts[i].timeControl = static_cast<TimeControl>(disc.timeControl);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found && m_hostCount < MAX_HOSTS) {
+                        auto& h = m_hosts[m_hostCount];
+                        memcpy(h.mac, mac, 6);
+                        h.gameId = disc.gameId;
+                        h.variant = static_cast<ChessVariant>(disc.variant);
+                        h.positionIndex = disc.positionIndex;
+                        h.timeControl = static_cast<TimeControl>(disc.timeControl);
+                        h.lastSeen = now;
+                        m_hostCount++;
+                        m_hostListDirty = true;
+                    }
                 }
             } else if (len >= sizeof(GameStartMsg) &&
                        static_cast<NetMsgType>(buf[0]) == NetMsgType::GameStart) {
@@ -421,12 +519,41 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 m_selectedVariant = static_cast<ChessVariant>(start.variant);
                 m_positionIndex = start.positionIndex;
                 m_selectedTimeControl = static_cast<TimeControl>(start.timeControl);
+                m_menuModal.hide();
                 onPaired();
                 return;
             }
         }
 
+        // Skip aging and modal rebuild while waiting for GameStart
+        if (!m_connecting) {
+            // Age out hosts not seen for 3 seconds
+            for (uint8_t i = 0; i < m_hostCount; ) {
+                if (now - m_hosts[i].lastSeen > 3000) {
+                    // Shift remaining entries down
+                    for (uint8_t j = i; j + 1 < m_hostCount; j++) {
+                        m_hosts[j] = m_hosts[j + 1];
+                    }
+                    m_hostCount--;
+                    m_hostListDirty = true;
+                } else {
+                    i++;
+                }
+            }
+
+            // Rebuild modal when host list changes
+            if (m_hostListDirty) {
+                rebuildHostList();
+            }
+
+            // Show initial modal on first tick (no hosts yet)
+            if (!m_menuModal.isVisible() && m_hostCount == 0) {
+                rebuildHostList();
+            }
+        }
+
         if (now - m_stateStartTime > 60000) {
+            m_menuModal.hide();
             m_statusLabel.setText("Timed out.");
             cancelPairing();
         }

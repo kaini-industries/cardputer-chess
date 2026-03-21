@@ -25,7 +25,7 @@ public:
     static constexpr uint8_t MAX_BUTTONS    = 8;
     static constexpr uint8_t MAX_TITLE_LEN  = 24;
     static constexpr uint8_t MAX_MSG_LEN    = 80;
-    static constexpr uint8_t MAX_BTN_LEN    = 12;
+    static constexpr uint8_t MAX_BTN_LEN    = 24;
 
     using ButtonCallback = std::function<void()>;
 

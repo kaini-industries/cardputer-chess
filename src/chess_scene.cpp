@@ -333,6 +333,10 @@ bool ChessScene::onInput(const InputEvent& event) {
             return true;
         }
         if (event.key == Key::ESCAPE) {
+            if (m_uiState == UIState::ShowMoves) {
+                deselectPiece();
+                return true;
+            }
             clearPuzzleMode();
             CardGFX::scenes().pop();
             return true;
@@ -351,6 +355,7 @@ bool ChessScene::onInput(const InputEvent& event) {
 
     case 'u':
     case 'U':
+        if (m_puzzleMode) break;
         if (m_netMode != NetworkMode::Online) {
             undoLastMove();
             return true;
@@ -359,6 +364,7 @@ bool ChessScene::onInput(const InputEvent& event) {
 
     case 'n':
     case 'N':
+        if (m_puzzleMode) break;
         if (m_netMode == NetworkMode::Online) break; // Disabled in Online mode
         if (m_aiThinking) break; // Disabled while AI is thinking
         // New game -- show confirmation modal
@@ -441,7 +447,7 @@ void ChessScene::newGame() {
     m_selectedSquare = NO_SQUARE;
     m_lastFrom = NO_SQUARE;
     m_lastTo = NO_SQUARE;
-    m_lastMoveWasExplosion = false;
+
     m_historyCount = 0;
     m_historyOverflow = false;
     m_legalMoves.clear();
@@ -574,26 +580,16 @@ void ChessScene::executeMove(const Move& move) {
     moveToSAN(sanBuf, sizeof(sanBuf), move, m_board, isCapture);
 
     // Set up move animation
-    bool isAtomicCapture = (m_variant == ChessVariant::Atomic && isCapture);
     m_moveAnim.piece = m_board.at(move.from.col, move.from.row);
     // For promotions, show the promoted piece sliding
     if (move.promotion != PieceType::None) {
         m_moveAnim.piece.type = move.promotion;
     }
     m_moveAnim.isCapture = isCapture;
-    if (isAtomicCapture) {
-        // Atomic captures: no slide, just explosion flash centered on TO
-        m_moveAnim.fromPx = toGridCol(move.to.col) * 15;
-        m_moveAnim.fromPy = toGridRow(move.to.row) * 15;
-        m_moveAnim.toPx = m_moveAnim.fromPx;
-        m_moveAnim.toPy = m_moveAnim.fromPy;
-    } else {
-        // Standard: slide from FROM to TO
-        m_moveAnim.fromPx = toGridCol(move.from.col) * 15;
-        m_moveAnim.fromPy = toGridRow(move.from.row) * 15;
-        m_moveAnim.toPx = toGridCol(move.to.col) * 15;
-        m_moveAnim.toPy = toGridRow(move.to.row) * 15;
-    }
+    m_moveAnim.fromPx = toGridCol(move.from.col) * 15;
+    m_moveAnim.fromPy = toGridRow(move.from.row) * 15;
+    m_moveAnim.toPx = toGridCol(move.to.col) * 15;
+    m_moveAnim.toPy = toGridRow(move.to.row) * 15;
     m_moveAnim.elapsed = 0;
     m_moveAnim.active = true;
 
@@ -609,7 +605,6 @@ void ChessScene::executeMove(const Move& move) {
     // Track last move for highlighting
     m_lastFrom = move.from;
     m_lastTo = move.to;
-    m_lastMoveWasExplosion = (m_variant == ChessVariant::Atomic && isCapture);
 
     // Start timer after first move
     if (!m_timerRunning && m_timeControl != TimeControl::None) {
@@ -659,6 +654,7 @@ void ChessScene::executeMove(const Move& move) {
                     uint8_t next = m_puzzleIndex + 1;
                     if (next < puzzleCount()) {
                         setPuzzleMode(next);
+                        focusChain().focusWidget(&m_boardGrid);
                     } else {
                         clearPuzzleMode();
                         CardGFX::scenes().pop();
@@ -672,8 +668,8 @@ void ChessScene::executeMove(const Move& move) {
                 m_gameOverModal.show();
                 focusChain().focusWidget(&m_gameOverModal);
                 m_uiState = UIState::GameOver;
-            } else if (m_puzzleSolutionStep < m_puzzleSolutionLen) {
-                // More moves: auto-play opponent response after delay
+            } else if (m_puzzleSolutionStep < m_puzzleSolutionLen && (m_puzzleSolutionStep % 2 == 1)) {
+                // Auto-play opponent response (odd steps) after delay
                 m_puzzleAutoPlayPending = true;
                 m_puzzleAutoPlayDelay = 500;
             }
@@ -693,7 +689,7 @@ void ChessScene::executeMove(const Move& move) {
                 m_lastFrom = NO_SQUARE;
                 m_lastTo = NO_SQUARE;
             }
-            m_lastMoveWasExplosion = false;
+        
             rebuildMoveList();
             m_puzzleHintLevel = 0;
             m_statusBar.setRight("Try again");
@@ -713,7 +709,7 @@ void ChessScene::executeMove(const Move& move) {
     }
 
     // Delay board flip until animation completes (flip would break animation coords)
-    if (m_netMode == NetworkMode::Local && m_aiDifficulty == AIDifficulty::None) {
+    if (m_netMode == NetworkMode::Local && m_aiDifficulty == AIDifficulty::None && !m_puzzleMode) {
         m_moveAnim.pendingFlip = true;
     }
 }
@@ -804,8 +800,7 @@ void ChessScene::updateStatusBar() {
                  whiteTurn ? " " : ">", bBuf);
     } else {
         const char* varTag = "";
-        if (m_variant == ChessVariant::Atomic) varTag = " [A]";
-        else if (m_variant == ChessVariant::Chess960) varTag = " [960]";
+        if (m_variant == ChessVariant::Chess960) varTag = " [960]";
         uint8_t fiftyClock = m_board.halfmoveClock() / 2;
         if (fiftyClock > 0) {
             snprintf(moveBuf, sizeof(moveBuf), "Move %d%s 50m:%d",
@@ -883,20 +878,6 @@ void ChessScene::addMoveToList(const char* san) {
 }
 
 void ChessScene::checkGameEnd() {
-    // Atomic: check for king explosion
-    if (m_variant == ChessVariant::Atomic) {
-        if (ChessRules::isKingExploded(m_board, PieceColor::White)) {
-            m_statusBar.setRight("Boom!");
-            showGameOverModal("Exploded!", "Black wins!");
-            return;
-        }
-        if (ChessRules::isKingExploded(m_board, PieceColor::Black)) {
-            m_statusBar.setRight("Boom!");
-            showGameOverModal("Exploded!", "White wins!");
-            return;
-        }
-    }
-
     if (ChessRules::isCheckmate(m_board)) {
         const char* winner = (m_board.sideToMove() == PieceColor::White)
                             ? "Black wins!" : "White wins!";
@@ -1001,17 +982,9 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     if (state.selected)  cellBg = theme.accentActive;
 
     // Capture flash
-    if (anim.active && anim.isCapture) {
+    if (anim.active && anim.isCapture && isAnimTo) {
         float t = (float)anim.elapsed / MoveAnim::DURATION_MS;
-        if (self->m_lastMoveWasExplosion) {
-            // Atomic explosion: flash entire 3x3 area around capture square
-            int8_t dc = (int8_t)col - (int8_t)(anim.toPx / 15);
-            int8_t dr = (int8_t)gridRow - (int8_t)(anim.toPy / 15);
-            if (dc >= -1 && dc <= 1 && dr >= -1 && dr <= 1 && t < 0.5f) {
-                cellBg = theme.error;
-            }
-        } else if (isAnimTo && t < 0.3f) {
-            // Standard capture: tint destination red
+        if (t < 0.3f) {
             cellBg = theme.error;
         }
     }

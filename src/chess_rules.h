@@ -34,11 +34,7 @@ namespace ChessRules {
     bool isDraw50Move(const ChessBoard& board);
 
     // Insufficient material (K vs K, K+B vs K, K+N vs K)
-    // Always returns false for Atomic variant.
     bool isInsufficientMaterial(const ChessBoard& board);
-
-    // Atomic: Is the given color's king missing (exploded)?
-    bool isKingExploded(const ChessBoard& board, PieceColor c);
 
 } // namespace ChessRules
 

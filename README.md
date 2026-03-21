@@ -1,20 +1,24 @@
 # Cardputer ADV Chess
 
-A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI opponent, and wireless multiplayer via ESP-NOW. Built with the [CardGFX](lib/cardgfx/README.md) UI framework.
+A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI opponent, wireless multiplayer via ESP-NOW, Chess960, timed games, and puzzles. Built with the [CardGFX](lib/cardgfx/README.md) UI framework.
 
 ## Features
 
 - Full chess rules: castling, en passant, pawn promotion, check/checkmate/stalemate detection
 - 50-move rule and insufficient material draw detection
-- Three game modes: local pass-and-play, vs AI, and wireless multiplayer
-- AI opponent with three difficulty levels (Easy, Medium, Hard)
+- **Chess960** (Fischer Random) variant with all 960 starting positions
+- **Time controls**: Bullet (1+0), Blitz (3+2, 5+3), Rapid (10+0), or untimed
+- Five game modes: local pass-and-play, vs AI, wireless multiplayer (host/join), and puzzles
+- AI opponent with three difficulty levels and an opening book
 - Wireless multiplayer over ESP-NOW (no WiFi network required)
+- **Puzzle mode** with mate-in-1, mate-in-2, and tactical puzzles with progress tracking
 - Animated piece movement between turns
+- **Move review mode** — step through the game's move history
 - Move history panel with standard algebraic notation (SAN)
 - Persistent game saving — games auto-save after each move and survive power cycles
 - Undo support (local and AI modes)
 - Resign support (online mode)
-- Status bar showing current turn, move number, and check/game-over indicators
+- Status bar showing current turn, move number, check/game-over indicators, and clock
 
 ## Game Modes
 
@@ -23,15 +27,42 @@ On launch, a lobby screen presents the available options. If a saved game exists
 | Mode | Description |
 |------|-------------|
 | **Resume** | Continue a previously saved game (only shown when a save exists). |
-
-| Mode | Description |
-|------|-------------|
 | **Local** | Pass-and-play on a single device. The board auto-rotates after each move so the current player's pieces are always at the bottom. |
-| **vs AI** | Play against the computer. Choose difficulty (Easy, Medium, or Hard) and your color (White or Black). |
-| **Host** | Broadcast a game over ESP-NOW and wait for an opponent to join. Host plays White. |
-| **Join** | Scan for a nearby host and connect. Joiner plays Black. |
+| **vs AI** | Play against the computer. Choose variant, time control, difficulty (Easy/Medium/Hard), and your color (White/Black). |
+| **Host** | Broadcast a game over ESP-NOW and wait for an opponent to join. Choose variant and time control before hosting. Host plays White. |
+| **Join** | Scan for nearby hosts. A list shows discovered hosts with their variant and time control. Select a host to connect. Joiner plays Black. |
+| **Puzzles** | Solve chess puzzles organized by category (mate-in-1, mate-in-2, tactics). Progress is saved across sessions. |
 
 Starting a new game (Local, vs AI, Host, or Join) clears any existing save. Network games are not saved since the connection cannot survive a power cycle.
+
+### Lobby Flow
+
+When starting a Local, vs AI, or Host game, the lobby walks through a setup flow:
+
+1. **Variant** — Standard or Chess960
+2. **Time Control** — No Timer, 1+0, 3+2, 5+3, or 10+0
+3. **Mode-specific** — AI games continue to difficulty and color selection
+
+Each step has a **Back** button to return to the previous choice.
+
+When joining, the joiner skips setup entirely — the host's variant and time control are shown in the host list and applied automatically on connect.
+
+## Chess960
+
+Chess960 (Fischer Random Chess) randomizes the back-rank piece placement while preserving castling compatibility. All 960 legal starting positions are supported. When selected, a random position is generated for each game.
+
+Castling in Chess960 follows the standard "king ends on c1/g1" convention regardless of the rook's starting position.
+
+## Time Controls
+
+| Preset | Initial Time | Increment |
+|--------|-------------|-----------|
+| **1+0** (Bullet) | 1 minute | None |
+| **3+2** (Blitz) | 3 minutes | +2 seconds per move |
+| **5+3** (Blitz) | 5 minutes | +3 seconds per move |
+| **10+0** (Rapid) | 10 minutes | None |
+
+Clocks are displayed in the status bar. When a player's time runs out, they lose on time. Timer state is included in saved games.
 
 ## AI Opponent
 
@@ -41,13 +72,33 @@ Starting a new game (Local, vs AI, Host, or Join) clears any existing save. Netw
 | **Medium** | 4 | 1s | Standard play |
 | **Hard** | 6+ | 3s | Iterative deepening for maximum depth within time |
 
-The AI uses alpha-beta pruning with move ordering (captures scored by MVV-LVA, promotions prioritized) and quiescence search to avoid the horizon effect. Positional evaluation uses piece-square tables.
+The AI uses alpha-beta pruning with move ordering (captures scored by MVV-LVA, promotions prioritized) and quiescence search to avoid the horizon effect. Positional evaluation uses piece-square tables. An opening book provides variety in standard games.
+
+## Puzzle Mode
+
+Puzzles are organized into three categories:
+
+- **Mate in 1** — Find the checkmate in one move
+- **Mate in 2** — Find the forcing sequence (you make 2 moves, opponent responds between)
+- **Tactics** — Find the best move or combination
+
+The puzzle menu shows overall progress (solved/total) and per-category counts. A **Next** button jumps to the first unsolved puzzle.
+
+In multi-move puzzles (mate-in-2, tactics), the opponent's response is auto-played after a short delay. If you play the wrong move, the board resets to try again.
+
+### Puzzle Controls
+
+| Key | Action |
+|-----|--------|
+| **H** | Hint — first press highlights the source square, second press adds the destination |
+| **S** | Skip to next puzzle |
+| **Esc** | Deselect piece (if selected) or exit to lobby |
 
 ## Wireless Multiplayer
 
 ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network setup needed. Both devices just need to be within WiFi range (~30m indoors). Pairing times out after 60 seconds.
 
-The host broadcasts a discovery message every 500ms. When a joiner connects, both devices exchange handshake messages and the game begins. Moves are sent with sequence numbers and acknowledged to ensure reliable delivery.
+The host broadcasts a discovery message every 500ms. Joiners see a list of available hosts with their variant and time control settings. When a joiner selects a host, both devices exchange handshake messages and the game begins. Moves are sent with sequence numbers and acknowledged to ensure reliable delivery.
 
 ## Controls
 
@@ -64,8 +115,21 @@ The host broadcasts a discovery message every 500ms. When a joiner connects, bot
 | **U** | Undo last move (local/AI only) |
 | **N** | Return to lobby with confirmation (local/AI only) |
 | **R** | Resign with confirmation (online only) |
+| **V** | Enter move review mode |
 
 > The Cardputer has no hardware arrow keys. The `;` `,` `.` `/` keys are mapped to arrows at the framework level, so they work as directional controls in all scenes.
+
+### In Review Mode
+
+Step through the game's move history to analyze past positions.
+
+| Key | Action |
+|-----|--------|
+| **,** | Step backward one move |
+| **.** | Step forward one move |
+| **Esc** | Exit review mode |
+
+Review mode is accessible during play (press **V**) or from the game-over dialog via the **Review** button.
 
 ### In Lobby
 
@@ -73,7 +137,7 @@ The host broadcasts a discovery message every 500ms. When a joiner connects, bot
 |-----|--------|
 | **,** **/** | Navigate menu buttons |
 | **Enter** | Select |
-| **Esc** | Cancel hosting/joining and return to menu |
+| **Esc** | Go back / cancel hosting/joining |
 
 ### Promotion
 
@@ -81,10 +145,10 @@ When a pawn reaches the back rank, a dialog appears with four choices: Queen, Kn
 
 ### Game Over
 
-When checkmate, stalemate, 50-move rule, or insufficient material is detected, a dialog offers:
+When checkmate, stalemate, 50-move rule, insufficient material, or time-out is detected, a dialog offers:
 
-- **New Game** -- return to the lobby
-- **View** -- dismiss the dialog and review the position (press **U** to undo moves)
+- **Menu** / **Lobby** — return to the lobby
+- **Review** — enter review mode to step through the game
 
 ## Installation
 
@@ -130,15 +194,19 @@ Tests cover focus management, widget rendering, scene lifecycle, and widget func
 .
 ├── src/
 │   ├── main.cpp                # Entry point
-│   ├── lobby_scene.h/.cpp      # Pre-game lobby (mode select, ESP-NOW pairing)
-│   ├── chess_scene.h/.cpp      # Game UI (board, widgets, input, animation)
+│   ├── lobby_scene.h/.cpp      # Pre-game lobby (mode/variant/time select, ESP-NOW pairing)
+│   ├── chess_scene.h/.cpp      # Game UI (board, widgets, input, animation, puzzles)
 │   ├── chess_types.h           # Piece, Square, Move data types
 │   ├── chess_board.h/.cpp      # Board state, make/unmake move
 │   ├── chess_rules.h/.cpp      # Move generation, check detection
 │   ├── chess_ai.h/.cpp         # AI opponent (alpha-beta with iterative deepening)
+│   ├── chess_opening_book.h/.cpp # Opening book for AI variety
+│   ├── chess960.h              # Chess960 position generation
 │   ├── chess_storage.h/.cpp    # Persistent game save/load (ESP32 NVS)
 │   ├── chess_net_protocol.h    # Network message types and protocol
-│   └── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
+│   ├── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
+│   ├── puzzle_data.h/.cpp      # Embedded puzzle database
+│   └── puzzle_storage.h/.cpp   # Puzzle progress persistence
 ├── lib/
 │   ├── cardgfx/                # CardGFX UI framework (see its README)
 │   └── cardgfx_test/           # CardGFX test suite
@@ -146,6 +214,7 @@ Tests cover focus management, widget rendering, scene lifecycle, and widget func
 │   └── test_main.cpp           # Test runner entry point
 ├── firmware/                   # M5Burner merged binaries (build artifact)
 ├── generate_m5burner_bin.py    # Post-build script for M5Burner binary
+├── inject_version.py           # Build script to inject firmware version
 ├── platformio.ini              # Build configuration
 └── README.md
 ```

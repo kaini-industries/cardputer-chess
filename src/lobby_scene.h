@@ -66,6 +66,21 @@ private:
     uint8_t  m_peerMac[6] = {};
     PieceColor m_localColor = PieceColor::White;
 
+    // ── Host Discovery (joiner side) ─────────────────────────────
+    static constexpr uint8_t MAX_HOSTS = 7; // Reserve 1 modal button for Back
+    struct DiscoveredHost {
+        uint8_t mac[6];
+        uint16_t gameId;
+        ChessVariant variant;
+        uint16_t positionIndex;
+        TimeControl timeControl;
+        uint32_t lastSeen;
+    };
+    DiscoveredHost m_hosts[MAX_HOSTS] = {};
+    uint8_t m_hostCount = 0;
+    bool    m_hostListDirty = false;
+    bool    m_connecting = false;  // True after selecting a host, waiting for GameStart
+
     // ── Widgets ──────────────────────────────────────────────────
     StatusBar m_statusBar;
     Label     m_titleLabel;
@@ -83,6 +98,8 @@ private:
     void startAIGame(PieceColor aiColor);
     void startHosting();
     void startJoining();
+    void connectToHost(uint8_t hostIdx);
+    void rebuildHostList();
     void onPaired();
     void cancelPairing();
     void startLocalGame();

@@ -11,8 +11,7 @@
 
 enum class ChessVariant : uint8_t {
     Standard = 0,
-    Atomic   = 1,
-    Chess960 = 2
+    Chess960 = 1
 };
 
 enum class TimeControl : uint8_t {
@@ -145,15 +144,12 @@ struct Move {
 // Undo record — everything needed to reverse a move
 struct MoveRecord {
     Move    move;
-    Piece   movedPiece;        // The piece that moved (before promotion, needed for atomic undo)
+    Piece   movedPiece;        // The piece that moved (before promotion)
     Piece   captured;          // What was captured (empty if none)
     Square  capturedSquare;    // Where the captured piece was (differs from move.to for en passant)
     uint8_t prevCastleRights;
     Square  prevEnPassantTarget;
     uint8_t prevHalfmoveClock;
-    // Atomic explosion data (only used when variant == Atomic and move is a capture)
-    Piece   exploded[8];       // Neighbor pieces destroyed, in KING_OFFS order
-    uint8_t explodedMask = 0;  // Bitmask: bit i set → exploded[i] was non-empty
 };
 
 // Fixed-size move list for move generation

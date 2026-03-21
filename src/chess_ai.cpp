@@ -104,73 +104,7 @@ static int8_t pstValue(PieceType type, uint8_t col, uint8_t row, PieceColor colo
 
 // ── Evaluation ───────────────────────────────────────────────────────
 
-// Atomic chess evaluation: material + king safety (explosion proximity)
-static int16_t evaluateAtomic(const ChessBoard& board) {
-    // Check for king explosion (terminal)
-    Square wk = board.findKing(PieceColor::White);
-    Square bk = board.findKing(PieceColor::Black);
-    if (isNoSquare(wk)) {
-        int16_t score = -10000;
-        return (board.sideToMove() == PieceColor::White) ? score : -score;
-    }
-    if (isNoSquare(bk)) {
-        int16_t score = 10000;
-        return (board.sideToMove() == PieceColor::White) ? score : -score;
-    }
-
-    int16_t score = 0;
-
-    // Material + PST (same as standard but contributes less to decisions)
-    for (uint8_t row = 0; row < 8; row++) {
-        for (uint8_t col = 0; col < 8; col++) {
-            Piece p = board.at(col, row);
-            if (p.empty()) continue;
-
-            int16_t val = MATERIAL[static_cast<uint8_t>(p.type)]
-                        + pstValue(p.type, col, row, p.color);
-
-            if (p.color == PieceColor::White) {
-                score += val;
-            } else {
-                score -= val;
-            }
-        }
-    }
-
-    // King safety: penalize having own pieces adjacent to own king
-    // (enemy can capture them to explode the king)
-    static const int8_t OFFS[8][2] = {
-        {-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}
-    };
-
-    auto kingSafety = [&](Square king, PieceColor kingColor) -> int16_t {
-        int16_t penalty = 0;
-        for (int i = 0; i < 8; i++) {
-            int8_t nc = (int8_t)king.col + OFFS[i][0];
-            int8_t nr = (int8_t)king.row + OFFS[i][1];
-            if (nc < 0 || nc >= 8 || nr < 0 || nr >= 8) continue;
-            Piece neighbor = board.at(nc, nr);
-            if (!neighbor.empty() && neighbor.color == kingColor) {
-                // Own piece next to own king = danger (can be captured to explode king)
-                penalty += 30;
-            }
-        }
-        return penalty;
-    };
-
-    // White king safety penalty (bad for white = subtract)
-    score -= kingSafety(wk, PieceColor::White);
-    // Black king safety penalty (bad for black = add, since score is white-relative)
-    score += kingSafety(bk, PieceColor::Black);
-
-    return (board.sideToMove() == PieceColor::White) ? score : -score;
-}
-
 int16_t ChessAI::evaluate(const ChessBoard& board) {
-    if (board.variant() == ChessVariant::Atomic) {
-        return evaluateAtomic(board);
-    }
-
     int16_t score = 0;
 
     for (uint8_t row = 0; row < 8; row++) {
@@ -251,12 +185,6 @@ static constexpr int MAX_QUIESCE_DEPTH = 8;
 static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdepth) {
     if (s_searchAborted) return 0;
 
-    // Atomic: check if our king was exploded
-    if (board.variant() == ChessVariant::Atomic &&
-        isNoSquare(board.findKing(board.sideToMove()))) {
-        return -10000;
-    }
-
     int16_t standPat = ChessAI::evaluate(board);
     if (standPat >= beta) return beta;
     if (standPat > alpha) alpha = standPat;
@@ -295,12 +223,6 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha, int16_t be
         return quiesce(board, alpha, beta, 0);
     }
 
-    // Atomic: check if our king was exploded by the previous move
-    if (board.variant() == ChessVariant::Atomic &&
-        isNoSquare(board.findKing(board.sideToMove()))) {
-        return -10000 + (6 - depth); // Our king was exploded — we lost
-    }
-
     MoveList moves;
     ChessRules::generateLegal(board, moves);
 
@@ -334,8 +256,8 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha, int16_t be
 // ── Public API ───────────────────────────────────────────────────────
 
 Move ChessAI::findBestMove(ChessBoard& board, AIDifficulty difficulty) {
-    // Try opening book first (Standard variant only)
-    if (board.variant() == ChessVariant::Standard) {
+    // Try opening book first (standard position only)
+    if (board.variant() != ChessVariant::Chess960) {
         Move bookMove;
         if (ChessOpeningBook::probe(board, bookMove)) {
             return bookMove;
