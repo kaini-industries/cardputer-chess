@@ -2,6 +2,8 @@
 
 A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI opponent, wireless multiplayer via ESP-NOW, Chess960, timed games, and puzzles. Built with the [CardGFX](lib/cardgfx/README.md) UI framework.
 
+![Cardputer ADV Chess](img/chess.jpeg)
+
 ## Features
 
 - Full chess rules: castling, en passant, pawn promotion, check/checkmate/stalemate detection
