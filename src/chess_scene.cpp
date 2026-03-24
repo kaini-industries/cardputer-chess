@@ -1,5 +1,6 @@
 #include "chess_scene.h"
 #include "chess_rules.h"
+#include "chess_sprites.h"
 #include "esp_now_transport.h"
 #include "puzzle_data.h"
 #include <Arduino.h>
@@ -345,6 +346,18 @@ bool ChessScene::onInput(const InputEvent& event) {
     }
 
     switch (event.key) {
+    case 't':
+    case 'T':
+        m_useSprites = !m_useSprites;
+        m_boardGrid.markDirty();
+        return true;
+
+    case 'b':
+    case 'B':
+        m_bwBoard = !m_bwBoard;
+        m_boardGrid.markDirty();
+        return true;
+
     case 'v':
     case 'V':
         if (m_historyCount > 0 && !m_aiThinking && !m_puzzleMode) {
@@ -959,6 +972,14 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
     focusChain().focusWidget(&m_gameOverModal);
 }
 
+// ── Sprite helper ─────────────────────────────────────────────────
+
+static const uint16_t* spriteForPiece(const Piece& p) {
+    uint8_t idx = static_cast<uint8_t>(p.type);
+    if (idx == 0 || idx > 6) return nullptr;
+    return (p.color == PieceColor::White) ? SPRITES_WHITE[idx] : SPRITES_BLACK[idx];
+}
+
 // ── Cell Renderer ─────────────────────────────────────────────────
 
 void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
@@ -975,7 +996,9 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
 
     // ── Cell background ───────────────────────────────────────────
     bool lightSquare = ((boardCol + boardRow) % 2 != 0);
-    uint16_t cellBg = lightSquare ? theme.gridCellA : theme.gridCellB;
+    uint16_t cellA = self->m_bwBoard ? HAL::rgb565(220, 220, 220) : theme.gridCellA;
+    uint16_t cellB = self->m_bwBoard ? HAL::rgb565(80,  80,  80)  : theme.gridCellB;
+    uint16_t cellBg = lightSquare ? cellA : cellB;
 
     if (state.marked)    cellBg = theme.accentMuted;
     if (state.highlight) cellBg = theme.gridHighlight;
@@ -1003,37 +1026,38 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     // ── Piece rendering (skip if this cell is part of slide animation) ──
     bool skipPiece = isAnimFrom || isAnimTo;
     if (!piece.empty() && !skipPiece) {
-        char ch = piece.typeChar();
-
-        // Center the character in the cell (scale 2 = 10x14 in a 15x15 cell)
-        uint8_t scale = 2;
-        uint16_t charW = FONT_CHAR_W * scale;
-        uint16_t charH = FONT_CHAR_H * scale;
-        int16_t px = cx + (cellW - charW) / 2;
-        int16_t py = cy + (cellH - charH) / 2;
-        // Clamp so outline (py-1) stays within cell
-        if (py < cy + 1) py = cy + 1;
-
-        // Draw outline for contrast
-        uint16_t outlineColor;
-        uint16_t fillColor;
-        if (piece.color == PieceColor::White) {
-            fillColor = HAL::rgb565(255, 255, 255);
-            outlineColor = HAL::rgb565(0, 0, 0);
+        if (self->m_useSprites) {
+            const uint16_t* sprite = spriteForPiece(piece);
+            if (sprite) {
+                canvas.drawBitmap565(cx, cy, sprite,
+                                     CHESS_SPRITE_W, CHESS_SPRITE_H,
+                                     CHESS_SPRITE_TRANSPARENT);
+            }
         } else {
-            fillColor = HAL::rgb565(30, 30, 30);
-            outlineColor = HAL::rgb565(200, 200, 200);
+            char ch = piece.typeChar();
+            uint8_t scale = 2;
+            uint16_t charW = FONT_CHAR_W * scale;
+            uint16_t charH = FONT_CHAR_H * scale;
+            int16_t px = cx + (cellW - charW) / 2;
+            int16_t py = cy + (cellH - charH) / 2;
+            if (py < cy + 1) py = cy + 1;
+
+            uint16_t fillColor, outlineColor;
+            if (piece.color == PieceColor::White) {
+                fillColor = HAL::rgb565(255, 255, 255);
+                outlineColor = HAL::rgb565(0, 0, 0);
+            } else {
+                fillColor = HAL::rgb565(30, 30, 30);
+                outlineColor = HAL::rgb565(200, 200, 200);
+            }
+
+            char text[2] = {ch, '\0'};
+            canvas.drawText(px - 1, py, text, outlineColor, scale);
+            canvas.drawText(px + 1, py, text, outlineColor, scale);
+            canvas.drawText(px, py - 1, text, outlineColor, scale);
+            canvas.drawText(px, py + 1, text, outlineColor, scale);
+            canvas.drawText(px, py, text, fillColor, scale);
         }
-
-        // Draw outline (4 directions)
-        char text[2] = {ch, '\0'};
-        canvas.drawText(px - 1, py, text, outlineColor, scale);
-        canvas.drawText(px + 1, py, text, outlineColor, scale);
-        canvas.drawText(px, py - 1, text, outlineColor, scale);
-        canvas.drawText(px, py + 1, text, outlineColor, scale);
-
-        // Draw the piece character
-        canvas.drawText(px, py, text, fillColor, scale);
     }
 
     // ── Capture indicator (highlighted square with enemy piece) ───
@@ -1059,7 +1083,7 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
 
     // ── File/Rank labels (on empty edge cells only) ───────────────
     if (piece.empty()) {
-        uint16_t labelColor = lightSquare ? theme.gridCellB : theme.gridCellA;
+        uint16_t labelColor = lightSquare ? cellB : cellA;
 
         // File labels (a-h) in bottom-right of bottom row
         if (gridRow == 7) {
@@ -1094,31 +1118,40 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
         int16_t ax = anim.fromPx + (int16_t)((anim.toPx - anim.fromPx) * eased);
         int16_t ay = anim.fromPy + (int16_t)((anim.toPy - anim.fromPy) * eased);
 
-        // Draw the sliding piece centered in the interpolated cell position
-        Piece ap = anim.piece;
-        char ach = ap.typeChar();
-        uint8_t ascale = 2;
-        uint16_t acharW = FONT_CHAR_W * ascale;
-        uint16_t acharH = FONT_CHAR_H * ascale;
-        int16_t apx = ax + (cellW - acharW) / 2;
-        int16_t apy = ay + (cellH - acharH) / 2;
-        if (apy < ay + 1) apy = ay + 1;
-
-        uint16_t aFill, aOutline;
-        if (ap.color == PieceColor::White) {
-            aFill = HAL::rgb565(255, 255, 255);
-            aOutline = HAL::rgb565(0, 0, 0);
+        // Draw the sliding piece at interpolated position
+        if (self->m_useSprites) {
+            const uint16_t* asprite = spriteForPiece(anim.piece);
+            if (asprite) {
+                canvas.drawBitmap565(ax, ay, asprite,
+                                     CHESS_SPRITE_W, CHESS_SPRITE_H,
+                                     CHESS_SPRITE_TRANSPARENT);
+            }
         } else {
-            aFill = HAL::rgb565(30, 30, 30);
-            aOutline = HAL::rgb565(200, 200, 200);
-        }
+            Piece ap = anim.piece;
+            char ach = ap.typeChar();
+            uint8_t ascale = 2;
+            uint16_t acharW = FONT_CHAR_W * ascale;
+            uint16_t acharH = FONT_CHAR_H * ascale;
+            int16_t apx = ax + (cellW - acharW) / 2;
+            int16_t apy = ay + (cellH - acharH) / 2;
+            if (apy < ay + 1) apy = ay + 1;
 
-        char atxt[2] = {ach, '\0'};
-        canvas.drawText(apx - 1, apy, atxt, aOutline, ascale);
-        canvas.drawText(apx + 1, apy, atxt, aOutline, ascale);
-        canvas.drawText(apx, apy - 1, atxt, aOutline, ascale);
-        canvas.drawText(apx, apy + 1, atxt, aOutline, ascale);
-        canvas.drawText(apx, apy, atxt, aFill, ascale);
+            uint16_t aFill, aOutline;
+            if (ap.color == PieceColor::White) {
+                aFill = HAL::rgb565(255, 255, 255);
+                aOutline = HAL::rgb565(0, 0, 0);
+            } else {
+                aFill = HAL::rgb565(30, 30, 30);
+                aOutline = HAL::rgb565(200, 200, 200);
+            }
+
+            char atxt[2] = {ach, '\0'};
+            canvas.drawText(apx - 1, apy, atxt, aOutline, ascale);
+            canvas.drawText(apx + 1, apy, atxt, aOutline, ascale);
+            canvas.drawText(apx, apy - 1, atxt, aOutline, ascale);
+            canvas.drawText(apx, apy + 1, atxt, aOutline, ascale);
+            canvas.drawText(apx, apy, atxt, aFill, ascale);
+        }
     }
 }
 

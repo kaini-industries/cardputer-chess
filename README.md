@@ -12,6 +12,8 @@ A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI
 - AI opponent with three difficulty levels and an opening book
 - Wireless multiplayer over ESP-NOW (no WiFi network required)
 - **Puzzle mode** with mate-in-1, mate-in-2, and tactical puzzles with progress tracking
+- **Pixel art sprites** with toggle to classic letter rendering (press **T**)
+- **Black & white board** toggle for high-contrast play (press **B**)
 - Animated piece movement between turns
 - **Move review mode** — step through the game's move history
 - Move history panel with standard algebraic notation (SAN)
@@ -116,6 +118,8 @@ The host broadcasts a discovery message every 500ms. Joiners see a list of avail
 | **N** | Return to lobby with confirmation (local/AI only) |
 | **R** | Resign with confirmation (online only) |
 | **V** | Enter move review mode |
+| **T** | Toggle between pixel art sprites and letter pieces |
+| **B** | Toggle black & white board colors |
 
 > The Cardputer has no hardware arrow keys. The `;` `,` `.` `/` keys are mapped to arrows at the framework level, so they work as directional controls in all scenes.
 
@@ -192,10 +196,13 @@ The build automatically generates a merged M5Burner-compatible binary at `firmwa
 │   ├── chess_net_protocol.h    # Network message types and protocol
 │   ├── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
 │   ├── puzzle_data.h/.cpp      # Embedded puzzle database
-│   └── puzzle_storage.h/.cpp   # Puzzle progress persistence
+│   ├── puzzle_storage.h/.cpp   # Puzzle progress persistence
+│   └── chess_sprites.h         # Auto-generated RGB565 piece sprites (from convert_sprites.py)
 ├── lib/
 │   └── cardgfx/                # CardGFX UI framework (see its README)
 ├── firmware/                   # M5Burner merged binaries (build artifact)
+├── pixel_chess_16x16_icons/     # Source PNG sprite sheets
+├── convert_sprites.py          # Pre-build script: PNG → RGB565 C header
 ├── post_build.py               # Post-build script (M5Burner binary, release staging)
 ├── inject_version.py           # Build script to inject firmware version
 ├── platformio.ini              # Build configuration

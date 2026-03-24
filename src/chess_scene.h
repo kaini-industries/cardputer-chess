@@ -45,6 +45,10 @@ private:
 
     UIState m_uiState = UIState::SelectPiece;
 
+    // ── Display Options ──────────────────────────────────────────
+    bool m_useSprites = true;   // true=pixel art, false=text letters
+    bool m_bwBoard = false;     // true=B&W squares, false=theme colors
+
     // ── Chess Engine State ────────────────────────────────────────
     ChessBoard m_board;
 
