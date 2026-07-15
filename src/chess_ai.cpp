@@ -185,11 +185,17 @@ static constexpr int MAX_QUIESCE_DEPTH = 8;
 static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdepth) {
     if (s_searchAborted) return 0;
 
-    int16_t standPat = ChessAI::evaluate(board);
-    if (standPat >= beta) return beta;
-    if (standPat > alpha) alpha = standPat;
+    bool inCheck = ChessRules::isInCheck(board, board.sideToMove());
 
-    if (qdepth >= MAX_QUIESCE_DEPTH) return alpha;
+    if (millis() > s_searchDeadline) { s_searchAborted = true; return 0; }
+
+    if (!inCheck) {
+        int16_t standPat = ChessAI::evaluate(board);
+        if (standPat >= beta) return beta;
+        if (standPat > alpha) alpha = standPat;
+    }
+
+    if (qdepth >= MAX_QUIESCE_DEPTH && !inCheck) return alpha;
 
     MoveList moves;
     ChessRules::generateLegal(board, moves);
@@ -197,9 +203,11 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdept
     for (uint8_t i = 0; i < moves.count; i++) {
         const Move& m = moves.moves[i];
 
-        // Only consider captures and promotions
-        bool isCapture = !board.at(m.to.col, m.to.row).empty() || m.isEnPassant;
-        if (!isCapture && m.promotion == PieceType::None) continue;
+        // Only consider captures and promotions (but search all moves when in check)
+        if (!inCheck) {
+            bool isCapture = !board.at(m.to.col, m.to.row).empty() || m.isEnPassant;
+            if (!isCapture && m.promotion == PieceType::None) continue;
+        }
 
         MoveRecord rec = board.makeMove(m);
         int16_t score = -quiesce(board, -beta, -alpha, qdepth + 1);

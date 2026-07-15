@@ -4,6 +4,10 @@ A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI
 
 ![Cardputer ADV Chess](img/chess.jpeg)
 
+## Development Status
+
+The v0.19.0 release addresses the findings from the July 2026 deep technical audit, including board/platform configuration, partition layout, and build pipeline fixes. The standard untimed chess engine has passed canonical move-generation checks. See the [July 2026 deep technical audit](audits/2026-07-14-cardputer-chess-deep-audit.md) for validation evidence, exact source locations, severity rankings, and the recommended remediation order.
+
 ## Features
 
 - Full chess rules: castling, en passant, pawn promotion, check/checkmate/stalemate detection
@@ -122,6 +126,7 @@ The host broadcasts a discovery message every 500ms. Joiners see a list of avail
 | **V** | Enter move review mode |
 | **T** | Toggle between pixel art sprites and letter pieces |
 | **B** | Toggle black & white board colors |
+| **F** | Flip board orientation |
 
 > The Cardputer has no hardware arrow keys. The `;` `,` `.` `/` keys are mapped to arrows at the framework level, so they work as directional controls in all scenes.
 
@@ -151,7 +156,7 @@ When a pawn reaches the back rank, a dialog appears with four choices: Queen, Kn
 
 ### Game Over
 
-When checkmate, stalemate, 50-move rule, insufficient material, or time-out is detected, a dialog offers:
+When checkmate, stalemate, 50-move rule, insufficient material, threefold repetition, or time-out is detected, a dialog offers:
 
 - **Menu** / **Lobby** — return to the lobby
 - **Review** — enter review mode to step through the game
@@ -169,10 +174,10 @@ When checkmate, stalemate, 50-move rule, insufficient material, or time-out is d
 
 ```bash
 # Build
-pio run
+pio run -e cardputer-adv
 
 # Upload to device
-pio run --target upload
+pio run -e cardputer-adv --target upload
 
 # Open serial monitor (115200 baud)
 pio device monitor
@@ -207,6 +212,7 @@ The build automatically generates a merged M5Burner-compatible binary at `firmwa
 ├── convert_sprites.py          # Pre-build script: PNG → RGB565 C header
 ├── post_build.py               # Post-build script (M5Burner binary, release staging)
 ├── inject_version.py           # Build script to inject firmware version
+├── partitions_8MB.csv          # 8MB flash partition table
 ├── platformio.ini              # Build configuration
 └── README.md
 ```
@@ -215,9 +221,9 @@ The build automatically generates a merged M5Burner-compatible binary at `firmwa
 
 | Library | Version | Purpose |
 |---------|---------|---------|
-| [M5Unified](https://github.com/m5stack/M5Unified) | ^0.2.10 | Unified hardware abstraction |
-| [M5Cardputer](https://github.com/m5stack/M5Cardputer) | ^1.1.1 | Cardputer keyboard and hardware |
-| [M5GFX](https://github.com/m5stack/M5GFX) | ^0.2.16 | Graphics library |
+| [M5Unified](https://github.com/m5stack/M5Unified) | 0.2.10 | Unified hardware abstraction |
+| [M5Cardputer](https://github.com/m5stack/M5Cardputer) | 1.1.1 | Cardputer keyboard and hardware |
+| [M5GFX](https://github.com/m5stack/M5GFX) | 0.2.16 | Graphics library |
 
 ## License
 

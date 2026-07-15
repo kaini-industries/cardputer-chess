@@ -129,10 +129,22 @@ bool EspNowTransport::send(const uint8_t* data, uint8_t len) {
     return esp_now_send(m_peerMac, data, len) == ESP_OK;
 }
 
+// ── MAC Filtering ───────────────────────────────────────────────────
+
+bool EspNowTransport::isPeerMac(const uint8_t mac[6]) const {
+    if (!m_hasPeer) return false;
+    return memcmp(mac, m_peerMac, 6) == 0;
+}
+
 // ── Receiving ────────────────────────────────────────────────────────
 
 void EspNowTransport::_onReceive(const uint8_t* mac, const uint8_t* data, int len) {
     if (len <= 0 || len > RX_SLOT_SIZE) return;
+
+    // Drop packets from unknown senders when paired
+    if (m_state == State::Paired && m_hasPeer && memcmp(mac, m_peerMac, 6) != 0) {
+        return;
+    }
 
     portENTER_CRITICAL_ISR(&s_rxMux);
 

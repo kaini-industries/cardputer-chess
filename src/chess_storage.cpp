@@ -4,8 +4,8 @@
 
 // ─── Binary Save Format ──────────────────────────────────────────────
 //
-// Version 4 layout (removed atomic explosion data from v3):
-//   [0]       version (0x04)
+// Version 5 layout (adds XOR checksum; same fields as v4):
+//   [0]       version (0x05)
 //   [1..64]   board squares — 1 byte each: (type << 4) | (color << 0)
 //   [65]      sideToMove
 //   [66]      castleRights
@@ -25,6 +25,7 @@
 //   [86..89]  timeBlackMs (little-endian uint32)
 //   [90]      timerRunning
 //   [91..]    history records (16 bytes each)
+//   [last]    XOR checksum of all preceding bytes
 //
 // Each MoveRecord packed as 16 bytes:
 //   [0]  from.col, [1]  from.row
@@ -42,7 +43,8 @@ static constexpr uint8_t SAVE_VERSION_V1 = 0x01;
 static constexpr uint8_t SAVE_VERSION_V2 = 0x02;
 static constexpr uint8_t SAVE_VERSION_V3 = 0x03;
 static constexpr uint8_t SAVE_VERSION_V4 = 0x04;
-static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V4;
+static constexpr uint8_t SAVE_VERSION_V5 = 0x05;
+static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V5;
 
 static constexpr size_t HEADER_SIZE_V1 = 78;
 static constexpr size_t RECORD_SIZE_V1 = 14;
@@ -142,7 +144,8 @@ void saveGame(const ChessBoard& board,
               TimeControl timeControl, uint32_t timeWhiteMs,
               uint32_t timeBlackMs, bool timerRunning) {
 
-    size_t totalSize = HEADER_SIZE + (size_t)historyCount * RECORD_SIZE;
+    size_t dataSize = HEADER_SIZE + (size_t)historyCount * RECORD_SIZE;
+    size_t totalSize = dataSize + 1; // +1 for XOR checksum byte
 
     // Use stack buffer for small saves, heap for large ones
     uint8_t stackBuf[512];
@@ -184,6 +187,13 @@ void saveGame(const ChessBoard& board,
         packRecord(buf + HEADER_SIZE + (size_t)i * RECORD_SIZE, history[i]);
     }
 
+    // Compute XOR checksum over all data bytes (v5+)
+    uint8_t xorSum = 0;
+    for (size_t i = 0; i < dataSize; i++) {
+        xorSum ^= buf[i];
+    }
+    buf[dataSize] = xorSum;
+
     // Write to NVS
     Preferences prefs;
     prefs.begin(NVS_NAMESPACE, false);
@@ -219,37 +229,29 @@ bool loadGame(ChessBoard& board,
 
     uint8_t version = buf[0];
     if (version != SAVE_VERSION_V1 && version != SAVE_VERSION_V2 &&
-        version != SAVE_VERSION_V3 && version != SAVE_VERSION_V4) {
+        version != SAVE_VERSION_V3 && version != SAVE_VERSION_V4 &&
+        version != SAVE_VERSION_V5) {
         delete[] buf;
         return false;
     }
 
-    // Board squares
-    board.reset(); // Start clean, then overwrite
-    for (uint8_t r = 0; r < 8; r++) {
-        for (uint8_t c = 0; c < 8; c++) {
-            uint8_t packed = buf[1 + r * 8 + c];
-            PieceType type = static_cast<PieceType>(packed >> 4);
-            PieceColor color = static_cast<PieceColor>(packed & 0x0F);
-            board.set(c, r, (type == PieceType::None) ? Piece{} : Piece(type, color));
+    // For v5+, verify XOR checksum before proceeding
+    if (version >= SAVE_VERSION_V5) {
+        // Checksum is the last byte; data is everything before it
+        if (len < 2) { delete[] buf; return false; }
+        size_t dataLen = len - 1;
+        uint8_t xorSum = 0;
+        for (size_t i = 0; i < dataLen; i++) {
+            xorSum ^= buf[i];
+        }
+        if (xorSum != buf[dataLen]) {
+            delete[] buf;
+            return false;
         }
     }
 
-    board.setSideToMove(static_cast<PieceColor>(buf[65]));
-    board.setCastleRights(buf[66]);
-    board.setEnPassantTarget(makeSquare(buf[67], buf[68]));
-    board.setHalfmoveClock(buf[69]);
-    board.setFullmoveNumber(readU16LE(buf + 70));
-
-    historyCount = buf[72];
-    if (historyCount > 250) historyCount = 250; // Clamp to MAX_HISTORY
-    historyOverflow = (buf[73] & 0x01) != 0;
-    aiDifficulty = static_cast<AIDifficulty>(buf[74]);
-    aiColor = static_cast<PieceColor>(buf[75]);
-    localColor = static_cast<PieceColor>(buf[76]);
-    boardFlipped = buf[77] != 0;
-
-    // Variant (v2+)
+    // --- Peek ahead: read variant and positionIndex BEFORE board.reset() ---
+    // This ensures Chess960 castle-column tracking is initialized correctly.
     if (version >= SAVE_VERSION_V2) {
         uint8_t rawVariant = buf[78];
         // Reject saves from removed variants (Atomic was 1 in old enum)
@@ -269,15 +271,62 @@ bool loadGame(ChessBoard& board,
         variant = ChessVariant::Standard;
     }
 
-    // Position index and timer (v3+)
     if (version >= SAVE_VERSION_V3 && len >= HEADER_SIZE) {
         positionIndex = readU16LE(buf + 79);
+    } else {
+        positionIndex = 518;
+    }
+
+    // Validate variant before using it
+    if (static_cast<uint8_t>(variant) > 1) {
+        delete[] buf;
+        return false;
+    }
+
+    // Set variant and positionIndex BEFORE reset so castle columns are correct
+    board.setVariant(variant);
+    board.setPositionIndex(positionIndex);
+    board.reset(); // Initializes castle-column tracking for the correct variant
+
+    // Board squares — overwrite the reset position with saved state
+    for (uint8_t r = 0; r < 8; r++) {
+        for (uint8_t c = 0; c < 8; c++) {
+            uint8_t packed = buf[1 + r * 8 + c];
+            PieceType type = static_cast<PieceType>(packed >> 4);
+            PieceColor color = static_cast<PieceColor>(packed & 0x0F);
+            board.set(c, r, (type == PieceType::None) ? Piece{} : Piece(type, color));
+        }
+    }
+
+    // Validate sideToMove
+    if (buf[65] > 1) { delete[] buf; return false; }
+    board.setSideToMove(static_cast<PieceColor>(buf[65]));
+    board.setCastleRights(buf[66]);
+    board.setEnPassantTarget(makeSquare(buf[67], buf[68]));
+    board.setHalfmoveClock(buf[69]);
+    board.setFullmoveNumber(readU16LE(buf + 70));
+
+    historyCount = buf[72];
+    if (historyCount > 250) historyCount = 250; // Clamp to MAX_HISTORY
+    historyOverflow = (buf[73] & 0x01) != 0;
+
+    // Validate enum values before casting
+    if (buf[74] > 3) { delete[] buf; return false; } // AIDifficulty: 0-3
+    if (buf[75] > 1) { delete[] buf; return false; } // aiColor: 0-1
+    if (buf[76] > 1) { delete[] buf; return false; } // localColor: 0-1
+    aiDifficulty = static_cast<AIDifficulty>(buf[74]);
+    aiColor = static_cast<PieceColor>(buf[75]);
+    localColor = static_cast<PieceColor>(buf[76]);
+    boardFlipped = buf[77] != 0;
+
+    // Timer fields (v3+) — variant and positionIndex already read above
+    if (version >= SAVE_VERSION_V3 && len >= HEADER_SIZE) {
+        if (buf[81] > 4) { delete[] buf; return false; } // TimeControl: 0-4
         timeControl = static_cast<TimeControl>(buf[81]);
         timeWhiteMs = readU32LE(buf + 82);
         timeBlackMs = readU32LE(buf + 86);
         timerRunning = buf[90] != 0;
     } else {
-        positionIndex = 518;
         timeControl = TimeControl::None;
         timeWhiteMs = 0;
         timeBlackMs = 0;

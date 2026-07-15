@@ -72,7 +72,8 @@ void LobbyScene::onEnter() {
 }
 
 void LobbyScene::onExit() {
-    if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining) {
+    if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining ||
+        m_state == LobbyState::WaitingForStartAck) {
         EspNowTransport::instance().shutdown();
     }
     m_menuModal.hide();
@@ -453,14 +454,20 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 memcpy(&accept, buf, sizeof(AcceptGameMsg));
                 if (accept.gameId == m_gameId) {
                     transport.addPeer(mac);
-                    GameStartMsg start;
-                    start.yourColor = 1;
-                    start.variant = static_cast<uint8_t>(m_selectedVariant);
-                    start.positionIndex = m_positionIndex;
-                    start.timeControl = static_cast<uint8_t>(m_selectedTimeControl);
+                    m_sessionId = (uint16_t)(millis() & 0xFFFF);
+                    m_pendingStart = GameStartMsg();
+                    m_pendingStart.yourColor = 1;
+                    m_pendingStart.variant = static_cast<uint8_t>(m_selectedVariant);
+                    m_pendingStart.positionIndex = m_positionIndex;
+                    m_pendingStart.timeControl = static_cast<uint8_t>(m_selectedTimeControl);
+                    m_pendingStart.sessionId = m_sessionId;
                     transport.send(
-                        reinterpret_cast<const uint8_t*>(&start), sizeof(start));
-                    onPaired();
+                        reinterpret_cast<const uint8_t*>(&m_pendingStart),
+                        sizeof(m_pendingStart));
+                    m_state = LobbyState::WaitingForStartAck;
+                    m_startAckRetries = 0;
+                    m_lastStartSendTime = millis();
+                    m_statusLabel.setText("Starting game...");
                     return;
                 }
             }
@@ -469,6 +476,40 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
         if (now - m_stateStartTime > 60000) {
             m_statusLabel.setText("Timed out.");
             cancelPairing();
+        }
+
+    } else if (m_state == LobbyState::WaitingForStartAck) {
+        // Host is waiting for joiner to acknowledge GameStart
+        uint8_t buf[32];
+        uint8_t mac[6];
+        while (transport.hasReceived()) {
+            uint8_t len = transport.receive(buf, sizeof(buf), mac);
+            if (len == 0) break;
+
+            if (len >= sizeof(GameStartAckMsg) &&
+                static_cast<NetMsgType>(buf[0]) == NetMsgType::GameStartAck) {
+                GameStartAckMsg ack;
+                memcpy(&ack, buf, sizeof(GameStartAckMsg));
+                if (ack.sessionId == m_sessionId) {
+                    onPaired();
+                    return;
+                }
+            }
+        }
+
+        // Retransmit every 200ms, up to 25 retries (5 seconds total)
+        if (now - m_lastStartSendTime > 200) {
+            if (m_startAckRetries < 25) {
+                transport.send(
+                    reinterpret_cast<const uint8_t*>(&m_pendingStart),
+                    sizeof(m_pendingStart));
+                m_startAckRetries++;
+                m_lastStartSendTime = now;
+            } else {
+                m_statusLabel.setText("Start timed out.");
+                cancelPairing();
+                return;
+            }
         }
 
     } else if (m_state == LobbyState::Joining) {
@@ -519,6 +560,13 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 m_selectedVariant = static_cast<ChessVariant>(start.variant);
                 m_positionIndex = start.positionIndex;
                 m_selectedTimeControl = static_cast<TimeControl>(start.timeControl);
+
+                // Send acknowledgment back to host
+                GameStartAckMsg ack;
+                ack.sessionId = start.sessionId;
+                transport.send(
+                    reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+
                 m_menuModal.hide();
                 onPaired();
                 return;
@@ -648,7 +696,8 @@ bool LobbyScene::onInput(const InputEvent& event) {
     if (!event.isDown()) return false;
 
     if (event.key == Key::ESCAPE) {
-        if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining) {
+        if (m_state == LobbyState::Hosting || m_state == LobbyState::Joining ||
+            m_state == LobbyState::WaitingForStartAck) {
             cancelPairing();
             return true;
         }

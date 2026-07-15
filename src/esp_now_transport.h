@@ -43,6 +43,7 @@ public:
     uint32_t msSinceLastReceive() const;
     const uint8_t* ownMac() const { return m_ownMac; }
     const uint8_t* peerMac() const { return m_peerMac; }
+    bool isPeerMac(const uint8_t mac[6]) const;
 
     // Called by ISR callback — do not call directly
     void _onReceive(const uint8_t* mac, const uint8_t* data, int len);

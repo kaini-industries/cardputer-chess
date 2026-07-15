@@ -1,6 +1,9 @@
 name: Build and Release Firmware
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   release:
     types: [created, edited]
   workflow_dispatch:
@@ -24,12 +27,28 @@ jobs:
         run: pip install platformio
 
       - name: Build firmware
-        run: pio run -e m5stack-cores3
+        run: pio run -e cardputer-adv
+
+      - name: Check firmware size
+        run: |
+          MERGED_BIN=$(ls firmware/cardputer-chess-*-m5-burner.bin 2>/dev/null | head -1)
+          if [ -z "$MERGED_BIN" ]; then
+            echo "ERROR: Merged binary not found"
+            exit 1
+          fi
+          SIZE=$(stat --format=%s "$MERGED_BIN")
+          MAX=$((8 * 1024 * 1024))
+          echo "Merged binary size: $SIZE bytes (limit: $MAX bytes)"
+          if [ "$SIZE" -gt "$MAX" ]; then
+            echo "ERROR: Firmware exceeds 8MB flash size"
+            exit 1
+          fi
 
       - name: Upload firmware to release
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.event.release.tag_name }}
           files: |
             firmware/cardputer-chess-*.bin
-            bin/m5stack-cores3/firmware.bin
+            bin/cardputer-adv/firmware.bin

@@ -137,7 +137,7 @@ struct Move {
     bool      isEnPassant = false;
 
     bool operator==(const Move& o) const {
-        return from == o.from && to == o.to && promotion == o.promotion;
+        return from == o.from && to == o.to && promotion == o.promotion && isCastle == o.isCastle && isEnPassant == o.isEnPassant;
     }
 };
 
@@ -154,21 +154,23 @@ struct MoveRecord {
 
 // Fixed-size move list for move generation
 struct MoveList {
-    static constexpr uint8_t MAX_MOVES = 128;
+    static constexpr uint16_t MAX_MOVES = 218;
 
-    Move    moves[MAX_MOVES];
-    uint8_t count = 0;
+    Move     moves[MAX_MOVES];
+    uint16_t count = 0;
 
     void clear() { count = 0; }
 
-    void add(const Move& m) {
+    bool add(const Move& m) {
         if (count < MAX_MOVES) {
             moves[count++] = m;
+            return true;
         }
+        return false;
     }
 
     bool contains(const Move& m) const {
-        for (uint8_t i = 0; i < count; i++) {
+        for (uint16_t i = 0; i < count; i++) {
             if (moves[i] == m) return true;
         }
         return false;

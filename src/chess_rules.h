@@ -36,6 +36,9 @@ namespace ChessRules {
     // Insufficient material (K vs K, K+B vs K, K+N vs K)
     bool isInsufficientMaterial(const ChessBoard& board);
 
+    // Threefold repetition detection (walks history backward)
+    bool isThreefoldRepetition(const ChessBoard& board, const MoveRecord* history, uint8_t historyCount);
+
 } // namespace ChessRules
 
 #endif // CHESS_RULES_H

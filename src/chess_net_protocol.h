@@ -10,12 +10,13 @@
 // All structs are packed to match wire format exactly.
 // =====================================================================
 
-static constexpr uint8_t NET_PROTOCOL_VERSION = 2;
+static constexpr uint8_t NET_PROTOCOL_VERSION = 3;
 
 enum class NetMsgType : uint8_t {
     Discovery    = 0x01,
     AcceptGame   = 0x02,
     GameStart    = 0x03,
+    GameStartAck = 0x04,
     MoveMsg      = 0x10,
     MoveAck      = 0x11,
     Heartbeat    = 0x20,
@@ -47,6 +48,12 @@ struct GameStartMsg {
     uint8_t    variant = 0;        // ChessVariant as uint8_t
     uint16_t   positionIndex = 518;
     uint8_t    timeControl = 0;    // TimeControl as uint8_t
+    uint16_t   sessionId = 0;
+};
+
+struct GameStartAckMsg {
+    NetMsgType type = NetMsgType::GameStartAck;
+    uint16_t   sessionId = 0;
 };
 
 // ── Gameplay ─────────────────────────────────────────────────────────
@@ -60,19 +67,23 @@ struct MoveNetMsg {
     uint8_t    toRow = 0;
     uint8_t    promotion = 0; // PieceType as uint8_t (0 = None)
     uint8_t    flags = 0;     // bit 0 = isCastle, bit 1 = isEnPassant
+    uint16_t   sessionId = 0;
 };
 
 struct MoveAckMsg {
     NetMsgType type = NetMsgType::MoveAck;
     uint8_t    seq = 0;
+    uint16_t   sessionId = 0;
 };
 
 struct HeartbeatMsg {
     NetMsgType type = NetMsgType::Heartbeat;
+    uint16_t   sessionId = 0;
 };
 
 struct ResignMsg {
     NetMsgType type = NetMsgType::Resign;
+    uint16_t   sessionId = 0;
 };
 
 #pragma pack(pop)
@@ -89,7 +100,7 @@ inline Move netMsgToMove(const MoveNetMsg& msg) {
     return m;
 }
 
-inline MoveNetMsg moveToNetMsg(const Move& move, uint8_t seq) {
+inline MoveNetMsg moveToNetMsg(const Move& move, uint8_t seq, uint16_t sessionId) {
     MoveNetMsg msg;
     msg.seq = seq;
     msg.fromCol = move.from.col;
@@ -99,6 +110,7 @@ inline MoveNetMsg moveToNetMsg(const Move& move, uint8_t seq) {
     msg.promotion = static_cast<uint8_t>(move.promotion);
     msg.flags = (move.isCastle ? 0x01 : 0x00) |
                 (move.isEnPassant ? 0x02 : 0x00);
+    msg.sessionId = sessionId;
     return msg;
 }
 

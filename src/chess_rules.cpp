@@ -1,4 +1,5 @@
 #include "chess_rules.h"
+#include "chess_zobrist.h"
 
 namespace ChessRules {
 
@@ -414,6 +415,28 @@ bool isInsufficientMaterial(const ChessBoard& board) {
     // K+B vs K+B — all bishops on same color square
     if (totalMinor == 2 && whiteKnights == 0 && blackKnights == 0 &&
         (bishopColorMask == 1 || bishopColorMask == 2)) return true;
+
+    return false;
+}
+
+bool isThreefoldRepetition(const ChessBoard& board, const MoveRecord* history, uint8_t historyCount) {
+    uint32_t currentHash = ChessZobrist::hash(board);
+    uint8_t count = 1; // current position counts as one occurrence
+
+    ChessBoard tempBoard = board;
+
+    for (int i = (int)historyCount - 1; i >= 0; i--) {
+        tempBoard.unmakeMove(history[i]);
+        uint32_t h = ChessZobrist::hash(tempBoard);
+        if (h == currentHash) {
+            count++;
+            if (count >= 3) return true;
+        }
+        // Stop at irreversible moves (pawn move or capture)
+        if (history[i].movedPiece.type == PieceType::Pawn || !history[i].captured.empty()) {
+            break;
+        }
+    }
 
     return false;
 }

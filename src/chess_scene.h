@@ -127,6 +127,7 @@ private:
     MoveNetMsg m_lastSentMove;    // For retransmission
     bool     m_disconnectShown = false;
     uint32_t m_disconnectGraceUntil = 0; // Grace period after "Wait" click
+    uint16_t m_sessionId = 0;
 
     // ── Widgets ───────────────────────────────────────────────────
     StatusBar m_statusBar;
@@ -200,7 +201,7 @@ public:
     void clearAIMode();
 
     // Called by LobbyScene to configure network mode before pushing
-    void setNetworkMode(PieceColor localColor);
+    void setNetworkMode(PieceColor localColor, uint16_t sessionId = 0);
     void clearNetworkMode();
 
     // Called by LobbyScene to resume a saved game

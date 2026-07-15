@@ -38,8 +38,9 @@ private:
         AIColor,        // Choosing player color vs AI
         Hosting,        // Broadcasting, waiting for joiner
         Joining,        // Listening for host broadcasts
-        Paired,         // Connected, transitioning to game
-        PuzzleCategory  // Choosing puzzle category
+        Paired,             // Connected, transitioning to game
+        WaitingForStartAck, // Host sent GameStart, waiting for ack
+        PuzzleCategory      // Choosing puzzle category
     };
 
     LobbyState m_state = LobbyState::Menu;
@@ -65,6 +66,12 @@ private:
     uint32_t m_stateStartTime = 0;
     uint8_t  m_peerMac[6] = {};
     PieceColor m_localColor = PieceColor::White;
+
+    // ── Game-Start Ack Retry State ───────────────────────────────
+    uint8_t      m_startAckRetries = 0;
+    uint32_t     m_lastStartSendTime = 0;
+    uint16_t     m_sessionId = 0;
+    GameStartMsg m_pendingStart;
 
     // ── Host Discovery (joiner side) ─────────────────────────────
     static constexpr uint8_t MAX_HOSTS = 7; // Reserve 1 modal button for Back

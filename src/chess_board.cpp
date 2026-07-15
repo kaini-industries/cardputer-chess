@@ -110,6 +110,9 @@ MoveRecord ChessBoard::makeMove(const Move& move) {
         record.capturedSquare = makeSquare(move.to.col, capturedRow);
         // Remove the captured pawn
         set(move.to.col, capturedRow, Piece{});
+    } else if (move.isCastle) {
+        record.captured = Piece{};
+        record.capturedSquare = move.to;
     } else {
         record.captured = at(move.to.col, move.to.row);
         record.capturedSquare = move.to;

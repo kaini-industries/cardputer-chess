@@ -1,9 +1,9 @@
 """
-Post-build script for `pio run -e m5stack-cores3`. Produces release artifacts:
+Post-build script for `pio run -e cardputer-adv`. Produces release artifacts:
 
   firmware/cardputer-chess-<ver>-m5-burner.bin  — merged (M5Burner, flash at 0x0)
   firmware/cardputer-chess-<ver>-app.bin        — app only (launcher/manual, flash at 0x10000)
-  bin/m5stack-cores3/firmware.bin               — raw firmware for GitHub release
+  bin/cardputer-adv/firmware.bin               — raw firmware for GitHub release
 """
 Import("env")
 
@@ -36,7 +36,7 @@ def merge_bin(source, target, env):
         "--chip", "esp32s3",
         "merge_bin",
         "--flash_mode", "dio",
-        "--flash_size", "16MB",
+        "--flash_size", "8MB",
         "-o", out_path,
         "0x0000", bootloader,
         "0x8000", partitions,
@@ -53,7 +53,7 @@ def merge_bin(source, target, env):
     print(f"App-only binary ready: {app_path} ({app_kb:.0f} KB)")
 
     # Copy raw firmware to bin/ for release artifact
-    bin_dir = os.path.join(env.subst("$PROJECT_DIR"), "bin", "m5stack-cores3")
+    bin_dir = os.path.join(env.subst("$PROJECT_DIR"), "bin", "cardputer-adv")
     os.makedirs(bin_dir, exist_ok=True)
     bin_path = os.path.join(bin_dir, "firmware.bin")
     shutil.copy2(firmware, bin_path)

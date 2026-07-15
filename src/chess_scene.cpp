@@ -1,6 +1,7 @@
 #include "chess_scene.h"
 #include "chess_rules.h"
 #include "chess_sprites.h"
+#include "chess_zobrist.h"
 #include "esp_now_transport.h"
 #include "puzzle_data.h"
 #include <Arduino.h>
@@ -17,7 +18,7 @@ static void moveToSAN(char* buf, uint8_t bufLen, const Move& move,
 
     // Castling
     if (move.isCastle) {
-        if (move.to.col > move.from.col) {
+        if (move.to.col == 6) {
             strncpy(buf, "O-O", bufLen);
         } else {
             strncpy(buf, "O-O-O", bufLen);
@@ -189,8 +190,7 @@ void ChessScene::onTick(uint32_t dt_ms) {
 
     // ── Timer countdown ──────────────────────────────────────
     if (m_timeControl != TimeControl::None && m_timerRunning &&
-        m_uiState != UIState::GameOver && m_uiState != UIState::PromotionPending &&
-        m_uiState != UIState::Reviewing && !m_moveAnim.active) {
+        m_uiState != UIState::GameOver && m_uiState != UIState::Reviewing) {
 
         uint32_t& activeTime = (m_board.sideToMove() == PieceColor::White)
                                ? m_timeWhiteMs : m_timeBlackMs;
@@ -356,6 +356,18 @@ bool ChessScene::onInput(const InputEvent& event) {
     case 'B':
         m_bwBoard = !m_bwBoard;
         m_boardGrid.markDirty();
+        return true;
+
+    case 'f':
+    case 'F':
+        if (!m_puzzleMode) {
+            uint8_t boardC = toBoardCol(m_boardGrid.cursorCol());
+            uint8_t boardR = toBoardRow(m_boardGrid.cursorRow());
+            m_boardFlipped = !m_boardFlipped;
+            m_boardGrid.setCursor(toGridCol(boardC), toGridRow(boardR));
+            updateBoardHighlights();
+            m_boardGrid.markDirty();
+        }
         return true;
 
     case 'v':
@@ -624,7 +636,7 @@ void ChessScene::executeMove(const Move& move) {
         m_timerRunning = true;
     }
     // Timer: add increment to the player who just moved
-    if (m_timeControl != TimeControl::None && m_timerRunning) {
+    if (m_timeControl != TimeControl::None && m_timerRunning && m_board.fullmoveNumber() > 1) {
         auto params = getTimeControlParams(m_timeControl);
         PieceColor movedSide = opponent(m_board.sideToMove());
         uint32_t& movedTime = (movedSide == PieceColor::White)
@@ -905,6 +917,9 @@ void ChessScene::checkGameEnd() {
     } else if (ChessRules::isInsufficientMaterial(m_board)) {
         m_statusBar.setRight("Draw");
         showGameOverModal("Insufficient", "Material for mate.");
+    } else if (ChessRules::isThreefoldRepetition(m_board, m_history, m_historyCount)) {
+        m_statusBar.setRight("Draw");
+        showGameOverModal("Threefold Rep.", "Game is a draw.");
     }
 }
 
@@ -1518,9 +1533,10 @@ void ChessScene::clearAIMode() {
 
 // ── Network Mode ─────────────────────────────────────────────────────
 
-void ChessScene::setNetworkMode(PieceColor localColor) {
+void ChessScene::setNetworkMode(PieceColor localColor, uint16_t sessionId) {
     m_netMode = NetworkMode::Online;
     m_localColor = localColor;
+    m_sessionId = sessionId;
     m_boardFlipped = (localColor == PieceColor::Black);
     m_awaitingAck = false;
     m_retryCount = 0;
@@ -1544,7 +1560,7 @@ void ChessScene::clearNetworkMode() {
 
 void ChessScene::sendMove(const Move& move) {
     uint8_t seq = (uint8_t)(m_historyCount); // Use history count as sequence
-    m_lastSentMove = moveToNetMsg(move, seq);
+    m_lastSentMove = moveToNetMsg(move, seq, m_sessionId);
     m_lastSentSeq = seq;
     m_awaitingAck = true;
     m_retryCount = 0;
@@ -1556,6 +1572,7 @@ void ChessScene::sendMove(const Move& move) {
 
 void ChessScene::sendHeartbeat() {
     HeartbeatMsg hb;
+    hb.sessionId = m_sessionId;
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&hb), sizeof(hb));
 }
@@ -1595,7 +1612,8 @@ void ChessScene::pollNetwork() {
             if (len >= sizeof(MoveAckMsg)) {
                 MoveAckMsg ack;
                 memcpy(&ack, buf, sizeof(MoveAckMsg));
-                if (m_awaitingAck && ack.seq == m_lastSentSeq) {
+                if (m_awaitingAck && ack.seq == m_lastSentSeq &&
+                    ack.sessionId == m_sessionId) {
                     m_awaitingAck = false;
                 }
             }
@@ -1645,14 +1663,23 @@ void ChessScene::pollNetwork() {
 }
 
 void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
-    // Send ack immediately
+    // Send ack immediately (even for wrong session — sender needs it)
     MoveAckMsg ack;
     ack.seq = msg.seq;
+    ack.sessionId = m_sessionId;
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
 
+    // Ignore moves from a different session
+    if (msg.sessionId != m_sessionId) return;
+
     // Deduplicate: if we've already applied this move, skip
     if (msg.seq < m_historyCount) return;
+
+    // Exit review mode before applying remote move
+    if (m_uiState == UIState::Reviewing) {
+        exitReviewMode();
+    }
 
     // Convert to Move and validate
     Move move = netMsgToMove(msg);
