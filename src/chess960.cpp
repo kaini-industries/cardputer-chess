@@ -1,5 +1,10 @@
 #include "chess960.h"
+
+#ifdef ARDUINO
 #include <esp_random.h>
+#else
+#include <cstdlib>
+#endif
 
 // Knight placement lookup table: maps index (0-9) to two positions
 // within 5 remaining squares after bishops and queen are placed.
@@ -70,5 +75,9 @@ Chess960Position chess960Generate(uint16_t index) {
 }
 
 uint16_t chess960RandomIndex() {
+#ifdef ARDUINO
     return (uint16_t)(esp_random() % 960);
+#else
+    return (uint16_t)(std::rand() % 960);
+#endif
 }

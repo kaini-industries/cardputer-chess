@@ -26,6 +26,9 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
+      - name: Validate chess behavior
+        run: pio test -e native
+
       - name: Build firmware
         run: pio run -e cardputer-adv
 

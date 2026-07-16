@@ -1,6 +1,7 @@
 #include "puzzle_data.h"
 #include "chess_board.h"
 #include "chess_rules.h"
+#include <cstring>
 
 // =====================================================================
 // Puzzle Database — Runtime-decoded format
@@ -14,7 +15,7 @@ struct SimplePuzzle {
     PuzzleType type;
     uint8_t rating;
     uint8_t solutionLen;
-    struct { uint8_t fc, fr, tc, tr; PieceType promo; } solution[4];
+    struct { uint8_t fc, fr, tc, tr; PieceType promo; } solution[MAX_PUZZLE_SOLUTION_MOVES];
 };
 
 static Piece charToPiece(char c) {
@@ -35,6 +36,31 @@ static Piece charToPiece(char c) {
     }
 }
 
+static bool isValidPositionChar(char c) {
+    return c == '.' || std::strchr("PNBRQKpnbrqk", c) != nullptr;
+}
+
+static bool isValidPuzzleType(PuzzleType type) {
+    return type == PuzzleType::MateIn1 ||
+           type == PuzzleType::MateIn2 ||
+           type == PuzzleType::Tactic;
+}
+
+static bool isValidPromotion(PieceType type) {
+    return type == PieceType::None || type == PieceType::Knight ||
+           type == PieceType::Bishop || type == PieceType::Rook ||
+           type == PieceType::Queen;
+}
+
+static bool isValidSolutionLength(PuzzleType type, uint8_t length) {
+    if (length == 0 || length > MAX_PUZZLE_SOLUTION_MOVES || (length % 2) == 0) {
+        return false;
+    }
+    if (type == PuzzleType::MateIn1) return length == 1;
+    if (type == PuzzleType::MateIn2) return length == 3;
+    return true;
+}
+
 // Position strings: 64 chars. Index = row*8+col. Row 0 = rank 1 (white side).
 // Coordinates: col 0=a..7=h, row 0=rank1..7=rank8
 
@@ -52,10 +78,10 @@ static const SimplePuzzle SIMPLE_PUZZLES[] = {
     {"...Q.RK." "........" "........" "........" "........" "........" "pp....pp" "......k.",
      0, PuzzleType::MateIn1, 45, 1, {{3,0, 3,7}}},
 
-    // 2: Arabian mate. Rh3-h7# with Nf6 guarding g8 and h7.
-    // W: Kg1(6,0) Nf6(5,5) Rh3(7,2). B: Kh8(7,7) pg7(6,6).
-    // Rh7 checks along h-file. Nf6 covers g8 and defends h7 (prevents Kxh7). pg7 blocks g7.
-    {"......K." "........" ".......R" "........" "........" ".....N.." "......p." ".......k",
+    // 2: Arabian mate. Rxh7# with Nf6 guarding g8 and h7.
+    // W: Kg1(6,0) Nf6(5,5) Rh3(7,2). B: Kh8(7,7) pg7(6,6) ph7(7,6).
+    // Rxh7 checks along h-file. Nf6 covers g8 and defends h7 (prevents Kxh7). pg7 blocks g7.
+    {"......K." "........" ".......R" "........" "........" ".....N.." "......pp" ".......k",
      0, PuzzleType::MateIn1, 60, 1, {{7,2, 7,6}}},
 
     // 3: Rook delivers Ra1-a8# with King covering escape.
@@ -92,9 +118,9 @@ static const SimplePuzzle SIMPLE_PUZZLES[] = {
      0, PuzzleType::MateIn1, 70, 1, {{2,6, 2,7, PieceType::Queen}}},
 
     // 9: Queen mate on g1. Qg3-g1#.
-    // W: Kf2(5,1) Qg3(6,2). B: Kh1(7,0) Rh2(7,1).
-    // Kf2 defends g1. Rh2 blocks h2 escape and can't capture g1 diagonally.
-    {".......k" ".....K.r" "......Q." "........" "........" "........" "........" "........",
+    // W: Kf1(5,0) Qg3(6,2). B: Kh1(7,0) Rh2(7,1).
+    // Kf1 defends g1. Rh2 blocks h2 escape and can't capture g1 diagonally.
+    {".....K.k" ".......r" "......Q." "........" "........" "........" "........" "........",
      0, PuzzleType::MateIn1, 55, 1, {{6,2, 6,0}}},
 
     // ── Mate in 1 (10-11) ────────────────────────────────────
@@ -125,27 +151,28 @@ static const SimplePuzzle SIMPLE_PUZZLES[] = {
     {"..R...K." "....Q..." "........" "........" "........" "........" ".....pp." "..r...k.",
      0, PuzzleType::MateIn2, 65, 3, {{2,0, 2,7}, {6,7, 7,6}, {4,1, 7,4}}},
 
-    // 14: Knight check + queen capture mate. Nf5-h6+ Kh8 Qa1xg7#.
-    // W: Kg1(6,0) Qa1(0,0) Nf5(5,4) Ne6(4,5). B: Kg8(6,7) Rf8(5,7) pf7(5,6) pg7(6,6) ph7(7,6).
-    // Nh6+ forces Kh8. Qxg7# via a1-g7 diagonal. Ne6 defends g7, Nh6 covers g8.
-    {"Q.....K." "........" "........" "........" ".....N.." "....N..." ".....ppp" ".....rk.",
-     0, PuzzleType::MateIn2, 70, 3, {{5,4, 7,5}, {6,7, 7,7}, {0,0, 6,6}}},
+    // 14: Discovered check and diagonal mate. Kh5-g6+ Kh8-g8 Qh1-a8#.
+    // W: Kh5(7,4) Qh1(7,0). B: Kh8(7,7).
+    // Kg6+ uncovers the queen's h-file check and forces Kg8. Qa8# covers the
+    // back rank while Kg6 covers f7, g7, and h7.
+    {".......Q" "........" "........" "........" ".......K" "........" "........" ".......k",
+     0, PuzzleType::MateIn2, 70, 3, {{7,4, 6,5}, {7,7, 6,7}, {7,0, 0,7}}},
 
     // ── Tactics (15-17) ────────────────────────────────────────
 
     // 15: Knight fork. Nd4-e6 forks Kg7 and Qc5.
-    // W: Kg1(6,0) Nd4(3,3). B: Kg7(6,6) Qc5(2,4).
-    {"......K." "........" "........" "...N...." "..q....." "........" "......k." "........",
+    // W: Kh1(7,0) Nd4(3,3). B: Kg7(6,6) Qc5(2,4).
+    {".......K" "........" "........" "...N...." "..q....." "........" "......k." "........",
      0, PuzzleType::Tactic, 55, 1, {{3,3, 4,5}}},
 
-    // 16: Pin wins piece. Bg5 pins Nf6 to Qd8. Bxf6 wins knight.
-    // W: Kg1(6,0) Bg5(6,4). B: Ke8(4,7) Nf6(5,5) Qd8(3,7).
-    {"......K." "........" "........" "........" "......B." ".....n.." "........" "...qk...",
+    // 16: Relative pin wins a piece. Bg5 pins Nf6 to Rd8. Bxf6 wins knight.
+    // W: Kg1(6,0) Bg5(6,4). B: Ke8(4,7) Nf6(5,5) Rd8(3,7).
+    {"......K." "........" "........" "........" "......B." ".....n.." "........" "...rk...",
      0, PuzzleType::Tactic, 60, 1, {{6,4, 5,5}}},
 
-    // 17: Knight fork. Ne4-f6+ forks Kg8 and Qd5.
-    // W: Kg1(6,0) Ne4(4,3). B: Kg8(6,7) Qd5(3,4) Rf8(5,7) ph7(7,6).
-    {"......K." "........" "........" "....N..." "...q...." "........" ".......p" ".....rk.",
+    // 17: Knight fork. Ne4-f6+ forks Kg8 and Qd5; pf7 blocks ...Rxf6.
+    // W: Kg1(6,0) Ne4(4,3). B: Kg8(6,7) Qd5(3,4) Rf8(5,7) pf7(5,6) ph7(7,6).
+    {"......K." "........" "........" "....N..." "...q...." "........" ".....p.p" ".....rk.",
      0, PuzzleType::Tactic, 55, 1, {{4,3, 5,5}}},
 };
 
@@ -176,34 +203,79 @@ uint16_t puzzleIndexByType(PuzzleType type, uint16_t nth) {
     return 0xFFFF;
 }
 
-void loadPuzzleIntoBoard(uint16_t index, ChessBoard& board, Move* solution,
+bool loadPuzzleIntoBoard(uint16_t index, ChessBoard& board, Move* solution,
                          uint8_t& solutionLen, PuzzleType& type, uint8_t& rating) {
-    if (index >= NUM_PUZZLES) return;
+    solutionLen = 0;
+    type = PuzzleType::MateIn1;
+    rating = 0;
+    if (solution != nullptr) {
+        for (uint8_t i = 0; i < MAX_PUZZLE_SOLUTION_MOVES; i++) {
+            solution[i] = Move{};
+        }
+    }
+
+    if (index >= NUM_PUZZLES || solution == nullptr) return false;
     const SimplePuzzle& p = SIMPLE_PUZZLES[index];
 
-    board.setVariant(ChessVariant::Standard);
-    board.reset();
+    if (p.position == nullptr || std::strlen(p.position) != 64 ||
+        p.sideToMove > 1 || !isValidPuzzleType(p.type) || p.rating == 0 ||
+        !isValidSolutionLength(p.type, p.solutionLen)) {
+        return false;
+    }
+
+    uint8_t whiteKings = 0;
+    uint8_t blackKings = 0;
+    for (uint8_t i = 0; i < 64; i++) {
+        const char c = p.position[i];
+        if (!isValidPositionChar(c)) return false;
+        if (c == 'K') whiteKings++;
+        if (c == 'k') blackKings++;
+        if ((i < 8 || i >= 56) && (c == 'P' || c == 'p')) return false;
+    }
+    if (whiteKings != 1 || blackKings != 1) return false;
+
+    Move decoded[MAX_PUZZLE_SOLUTION_MOVES]{};
+    for (uint8_t i = 0; i < p.solutionLen; i++) {
+        const auto& encoded = p.solution[i];
+        if (encoded.fc >= 8 || encoded.fr >= 8 ||
+            encoded.tc >= 8 || encoded.tr >= 8 ||
+            !isValidPromotion(encoded.promo)) {
+            return false;
+        }
+        decoded[i].from = makeSquare(encoded.fc, encoded.fr);
+        decoded[i].to = makeSquare(encoded.tc, encoded.tr);
+        decoded[i].promotion = encoded.promo;
+    }
+
+    ChessBoard loadedBoard;
+    loadedBoard.setVariant(ChessVariant::Standard);
+    loadedBoard.reset();
 
     for (uint8_t r = 0; r < 8; r++) {
         for (uint8_t c = 0; c < 8; c++) {
-            board.set(c, r, charToPiece(p.position[r * 8 + c]));
+            loadedBoard.set(c, r, charToPiece(p.position[r * 8 + c]));
         }
     }
-    board.setSideToMove(p.sideToMove == 0 ? PieceColor::White : PieceColor::Black);
-    board.setCastleRights(0);
-    board.setEnPassantTarget(NO_SQUARE);
-    board.setHalfmoveClock(0);
-    board.setFullmoveNumber(1);
+    loadedBoard.setSideToMove(p.sideToMove == 0 ? PieceColor::White : PieceColor::Black);
+    loadedBoard.setCastleRights(0);
+    loadedBoard.setEnPassantTarget(NO_SQUARE);
+    loadedBoard.setHalfmoveClock(0);
+    loadedBoard.setFullmoveNumber(1);
 
+    // The side that moved immediately before the puzzle may not have left
+    // its own king in check. The side to move may legally begin in check.
+    if (ChessRules::isInCheck(loadedBoard, opponent(loadedBoard.sideToMove()))) {
+        return false;
+    }
+
+    board = loadedBoard;
     solutionLen = p.solutionLen;
     type = p.type;
     rating = p.rating;
 
-    for (uint8_t i = 0; i < p.solutionLen && i < 4; i++) {
-        solution[i].from = makeSquare(p.solution[i].fc, p.solution[i].fr);
-        solution[i].to = makeSquare(p.solution[i].tc, p.solution[i].tr);
-        solution[i].promotion = p.solution[i].promo;
-        solution[i].isCastle = false;
-        solution[i].isEnPassant = false;
+    for (uint8_t i = 0; i < p.solutionLen; i++) {
+        solution[i] = decoded[i];
     }
+
+    return true;
 }

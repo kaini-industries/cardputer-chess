@@ -127,6 +127,11 @@ void ChessScene::setup() {
     m_boardGrid.setOnAction([this](uint8_t col, uint8_t row) {
         onCellAction(col, row);
     });
+    m_boardGrid.setCursorNavigation(
+        [this](uint8_t key, uint8_t currentCol, uint8_t currentRow,
+               uint8_t& nextCol, uint8_t& nextRow) {
+            return navigateBoardCursor(key, currentCol, currentRow, nextCol, nextRow);
+        });
     addWidget(&m_boardGrid, true); // focusable
 
     // ── Moves Label ───────────────────────────────────────────────
@@ -142,7 +147,7 @@ void ChessScene::setup() {
     addWidget(&m_moveList); // not focusable -- display only
 
     // ── Hint Bar ──────────────────────────────────────────────────
-    m_hintBar.setText("[U]ndo [N]ew");
+    m_hintBar.setText("[U]ndo [Esc]Menu");
     m_hintBar.setBounds({120, 123, 120, 12});
     m_hintBar.setAlign(Label::Align::Center);
     m_hintBar.setDrawBg(true);
@@ -159,13 +164,27 @@ void ChessScene::setup() {
     m_gameOverModal.setVisible(false);
     addWidget(&m_gameOverModal, true);
 
+    // ── Exit Confirmation Modal ───────────────────────────────────
+    // Added last so it draws over every other game widget.
+    m_exitModal.setBounds({0, 0, SCREEN_W, SCREEN_H});
+    m_exitModal.setVisible(false);
+    addWidget(&m_exitModal, true);
+
     // Start a new game
     newGame();
 }
 
 void ChessScene::onEnter() {
-    // Focus the board grid
-    focusChain().focusWidget(&m_boardGrid);
+    m_leavingToMenu = false;
+    if (m_exitModal.isVisible()) {
+        focusChain().focusWidget(&m_exitModal);
+    } else if (m_promotionModal.isVisible()) {
+        focusChain().focusWidget(&m_promotionModal);
+    } else if (m_gameOverModal.isVisible()) {
+        focusChain().focusWidget(&m_gameOverModal);
+    } else {
+        focusChain().focusWidget(&m_boardGrid);
+    }
 }
 
 void ChessScene::onTick(uint32_t dt_ms) {
@@ -186,11 +205,15 @@ void ChessScene::onTick(uint32_t dt_ms) {
         if (m_gameOverModal.isVisible()) {
             m_gameOverModal.markDirty();
         }
+        if (m_exitModal.isVisible()) {
+            m_exitModal.markDirty();
+        }
     }
 
     // ── Timer countdown ──────────────────────────────────────
     if (m_timeControl != TimeControl::None && m_timerRunning &&
-        m_uiState != UIState::GameOver && m_uiState != UIState::Reviewing) {
+        m_uiState != UIState::GameOver && m_uiState != UIState::Reviewing &&
+        m_uiState != UIState::ExitConfirm) {
 
         uint32_t& activeTime = (m_board.sideToMove() == PieceColor::White)
                                ? m_timeWhiteMs : m_timeBlackMs;
@@ -269,7 +292,9 @@ void ChessScene::onTick(uint32_t dt_ms) {
     }
 
     // Keep cursor coordinate in status bar current (skip when modal visible)
-    if (!m_promotionModal.isVisible() && !m_gameOverModal.isVisible()) {
+    if (m_uiState != UIState::Reviewing &&
+        !m_promotionModal.isVisible() && !m_gameOverModal.isVisible() &&
+        !m_exitModal.isVisible()) {
         updateStatusBar();
     }
 }
@@ -277,8 +302,12 @@ void ChessScene::onTick(uint32_t dt_ms) {
 bool ChessScene::onInput(const InputEvent& event) {
     if (!event.isDown()) return false;
 
-    // Block input during move animation
-    if (m_moveAnim.active) return true;
+    // Visible modals own input through the focus chain. Keeping this guard also
+    // prevents a stale board focus from acting behind an overlay.
+    if (m_exitModal.isVisible() || m_promotionModal.isVisible() ||
+        m_gameOverModal.isVisible()) {
+        return false;
+    }
 
     // Review mode navigation
     if (m_uiState == UIState::Reviewing) {
@@ -286,21 +315,58 @@ bool ChessScene::onInput(const InputEvent& event) {
             exitReviewMode();
             return true;
         }
-        if (event.key == ',' || event.key == '<') {
+        if (event.key == '<') {
             if (m_reviewIndex > 0) reviewGoTo(m_reviewIndex - 1);
             return true;
         }
-        if (event.key == '.' || event.key == '>') {
-            if (m_reviewIndex < m_historyCount) reviewGoTo(m_reviewIndex + 1);
+        if (event.key == '>') {
+            if (m_reviewIndex < m_historyCount) {
+                reviewGoTo(m_reviewIndex + 1);
+            }
             return true;
         }
+        if (event.key == 'n' || event.key == 'N') {
+            if (m_preReviewState == UIState::GameOver) {
+                if (m_netMode == NetworkMode::Online) {
+                    leaveOnlineGame();
+                } else {
+                    leaveToMenu();
+                }
+            } else if (m_netMode == NetworkMode::Local) {
+                requestExitToMenu();
+            }
+            return true;
+        }
+        // Directional review input is handled by the board Grid's navigation
+        // callback before it can move the cursor.
         return true; // Block all other input in review mode
     }
 
-    // If a modal is visible, let it handle input
-    if (m_promotionModal.isVisible() || m_gameOverModal.isVisible()) {
-        return false;
+    // Local and AI games expose an always-reachable leave-game path. Handle it
+    // before the animation guard so a key press during the 250 ms animation is
+    // not discarded. N bypasses selection cancellation; Escape cancels a
+    // selected piece first and prompts from the idle board.
+    if (!m_puzzleMode && m_netMode == NetworkMode::Local) {
+        if (event.key == 'n' || event.key == 'N') {
+            requestExitToMenu();
+            return true;
+        }
+        if (event.key == Key::ESCAPE) {
+            if (m_uiState == UIState::ShowMoves) {
+                if (!isNoSquare(m_selectedSquare)) {
+                    m_boardGrid.setCursor(toGridCol(m_selectedSquare.col),
+                                          toGridRow(m_selectedSquare.row));
+                }
+                deselectPiece();
+            } else if (m_uiState == UIState::SelectPiece) {
+                requestExitToMenu();
+            }
+            return true;
+        }
     }
+
+    // Block remaining game actions during move animation.
+    if (m_moveAnim.active) return true;
 
     // Puzzle mode keys
     if (m_puzzleMode) {
@@ -387,29 +453,6 @@ bool ChessScene::onInput(const InputEvent& event) {
         }
         break;
 
-    case 'n':
-    case 'N':
-        if (m_puzzleMode) break;
-        if (m_netMode == NetworkMode::Online) break; // Disabled in Online mode
-        if (m_aiThinking) break; // Disabled while AI is thinking
-        // New game -- show confirmation modal
-        m_gameOverModal.setTitle("New Game?");
-        m_gameOverModal.setMessage("Start a new game?");
-        m_gameOverModal.clearButtons();
-        m_gameOverModal.addButton("Yes", [this]() {
-            m_gameOverModal.hide();
-            ChessStorage::clearSave();
-            if (m_aiDifficulty != AIDifficulty::None) clearAIMode();
-            CardGFX::scenes().pop(); // Back to lobby
-        });
-        m_gameOverModal.addButton("No", [this]() {
-            m_gameOverModal.hide();
-            focusChain().focusWidget(&m_boardGrid);
-        });
-        m_gameOverModal.show();
-        focusChain().focusWidget(&m_gameOverModal);
-        return true;
-
     case 'r':
     case 'R':
         if (m_netMode == NetworkMode::Online && m_uiState != UIState::GameOver) {
@@ -440,6 +483,10 @@ bool ChessScene::onInput(const InputEvent& event) {
 
     case Key::ESCAPE:
         if (m_uiState == UIState::ShowMoves) {
+            if (!isNoSquare(m_selectedSquare)) {
+                m_boardGrid.setCursor(toGridCol(m_selectedSquare.col),
+                                      toGridRow(m_selectedSquare.row));
+            }
             deselectPiece();
             return true;
         }
@@ -451,6 +498,62 @@ bool ChessScene::onInput(const InputEvent& event) {
 }
 
 // ── Game Logic ────────────────────────────────────────────────────
+
+bool ChessScene::navigateBoardCursor(uint8_t key, uint8_t currentCol,
+                                     uint8_t currentRow, uint8_t& nextCol,
+                                     uint8_t& nextRow) {
+    CursorDirection direction;
+    switch (key) {
+    case Key::UP:    direction = CursorDirection::Up; break;
+    case Key::DOWN:  direction = CursorDirection::Down; break;
+    case Key::LEFT:  direction = CursorDirection::Left; break;
+    case Key::RIGHT: direction = CursorDirection::Right; break;
+    default: return false;
+    }
+
+    // Review mode owns directional input. Consuming it here prevents the
+    // focused Grid from moving its cursor before ChessScene can step history.
+    if (m_uiState == UIState::Reviewing) {
+        if (direction == CursorDirection::Left ||
+            direction == CursorDirection::Up) {
+            if (m_reviewIndex > 0) reviewGoTo(m_reviewIndex - 1);
+        } else if (m_reviewIndex < m_historyCount) {
+            reviewGoTo(m_reviewIndex + 1);
+        }
+        nextCol = currentCol;
+        nextRow = currentRow;
+        return true;
+    }
+
+    if (m_uiState != UIState::ShowMoves) return false;
+
+    Square destinations[64];
+    bool seen[8][8] = {};
+    uint8_t destinationCount = 0;
+    for (uint16_t i = 0; i < m_legalMoves.count; i++) {
+        const Square boardDestination = m_legalMoves.moves[i].to;
+        if (!boardDestination.valid()) continue;
+
+        const uint8_t gridCol = toGridCol(boardDestination.col);
+        const uint8_t gridRow = toGridRow(boardDestination.row);
+        if (seen[gridRow][gridCol]) continue;
+
+        seen[gridRow][gridCol] = true;
+        destinations[destinationCount++] = makeSquare(gridCol, gridRow);
+    }
+
+    Square next = makeSquare(currentCol, currentRow);
+    if (chooseCursorDestination(destinations, destinationCount,
+                                makeSquare(currentCol, currentRow),
+                                direction, next)) {
+        nextCol = next.col;
+        nextRow = next.row;
+    }
+
+    // Never fall back to one-cell movement while a piece is selected, even if
+    // malformed state somehow produces no candidate destinations.
+    return true;
+}
 
 void ChessScene::newGame() {
     // Clear puzzle state (in case we're coming from puzzle mode)
@@ -493,7 +596,7 @@ void ChessScene::newGame() {
     if (m_netMode == NetworkMode::Online) {
         m_hintBar.setText("[R]esign");
     } else {
-        m_hintBar.setText("[U]ndo [N]ew");
+        m_hintBar.setText("[U]ndo [Esc]Menu");
     }
 }
 
@@ -655,11 +758,33 @@ void ChessScene::executeMove(const Move& move) {
     updateStatusBar();
     updateBoardHighlights();
 
-    // Puzzle mode: validate move against solution
+    // Puzzle mode: validate the move against the stored line and, for mate
+    // puzzles, the actual board outcome. executeMove() is only reached for a
+    // legal move, so outcome-based acceptance also supports equivalent mating
+    // moves and underpromotions.
     if (m_puzzleMode && m_puzzleSolutionStep < m_puzzleSolutionLen) {
         const Move& expected = m_puzzleSolution[m_puzzleSolutionStep];
-        if (move.from == expected.from && move.to == expected.to &&
-            (expected.promotion == PieceType::None || move.promotion == expected.promotion)) {
+        const bool matchesStoredMove =
+            move.from == expected.from && move.to == expected.to &&
+            (expected.promotion == PieceType::None || move.promotion == expected.promotion);
+        const bool completesSequence =
+            (uint8_t)(m_puzzleSolutionStep + 1) >= m_puzzleSolutionLen;
+        const bool isPlayerStep = (m_puzzleSolutionStep % 2) == 0;
+
+        bool correctMove = matchesStoredMove;
+        if (m_puzzleType == PuzzleType::MateIn1) {
+            // A mate-in-one is solved by any legal mating move, regardless of
+            // whether its coordinates or promotion match the canonical hint.
+            correctMove = ChessRules::isCheckmate(m_board);
+        } else if (m_puzzleType == PuzzleType::MateIn2 && completesSequence) {
+            // Keep the canonical first move and auto-played response, but the
+            // player's final move must actually mate and may be any mating move.
+            // Requiring a player step also prevents malformed even-length lines
+            // from being completed by an auto-played coordinate match alone.
+            correctMove = isPlayerStep && ChessRules::isCheckmate(m_board);
+        }
+
+        if (correctMove) {
             // Correct move
             m_puzzleSolutionStep++;
             m_puzzleHintLevel = 0;
@@ -936,7 +1061,16 @@ void ChessScene::showPromotionModal(const Move& baseMove) {
     };
 
     m_promotionModal.clearButtons();
-    m_promotionModal.setEscapeCallback([](){});  // Must choose a piece
+    m_promotionModal.setEscapeCallback([this]() {
+        m_promotionModal.hide();
+        m_uiState = UIState::ShowMoves;
+        if (!isNoSquare(m_selectedSquare)) {
+            m_boardGrid.setCursor(toGridCol(m_selectedSquare.col),
+                                  toGridRow(m_selectedSquare.row));
+        }
+        updateBoardHighlights();
+        focusChain().focusWidget(&m_boardGrid);
+    });
     m_promotionModal.setTitle("Promote to:");
     m_promotionModal.setMessage("");
 
@@ -957,8 +1091,86 @@ void ChessScene::showPromotionModal(const Move& baseMove) {
     focusChain().focusWidget(&m_promotionModal);
 }
 
+void ChessScene::requestExitToMenu() {
+    if (CardGFX::scenes().active() != this || m_leavingToMenu ||
+        m_exitModal.isVisible() || m_puzzleMode ||
+        m_netMode == NetworkMode::Online || m_uiState == UIState::GameOver ||
+        m_uiState == UIState::PromotionPending) {
+        return;
+    }
+
+    m_preExitState = m_uiState;
+    m_uiState = UIState::ExitConfirm;
+
+    m_exitModal.clearButtons();
+    m_exitModal.setTitle("Leave game?");
+    m_exitModal.setMessage("Current game will be discarded.");
+    m_exitModal.setEscapeCallback([this]() { cancelExitToMenu(); });
+    m_exitModal.addButton("Stay", [this]() { cancelExitToMenu(); });
+    m_exitModal.addButton("Menu", [this]() { leaveToMenu(); });
+    m_exitModal.show();
+    focusChain().focusWidget(&m_exitModal);
+}
+
+void ChessScene::cancelExitToMenu() {
+    if (!m_exitModal.isVisible() || m_leavingToMenu) return;
+
+    m_exitModal.hide();
+    m_uiState = m_preExitState;
+    focusChain().focusWidget(&m_boardGrid);
+    if (m_uiState == UIState::Reviewing) {
+        // Rebuild the historical position and its Review x/y status instead of
+        // replacing it with the live-game turn/cursor status.
+        reviewGoTo(m_reviewIndex);
+    } else {
+        updateStatusBar();
+    }
+    m_boardGrid.markDirty();
+}
+
+void ChessScene::leaveToMenu() {
+    if (CardGFX::scenes().active() != this || m_leavingToMenu) return;
+    m_leavingToMenu = true;
+
+    m_exitModal.hide();
+    m_promotionModal.hide();
+    m_gameOverModal.hide();
+    ChessStorage::clearSave();
+
+    // Reset transient session state without calling newGame(); queued input is
+    // still routed to this scene until the current frame finishes.
+    m_aiDifficulty = AIDifficulty::None;
+    m_aiThinking = false;
+    m_localColor = PieceColor::White;
+    m_boardFlipped = false;
+    m_timerRunning = false;
+    m_moveAnim.active = false;
+    m_moveAnim.pendingFlip = false;
+    m_uiState = UIState::SelectPiece;
+    m_selectedSquare = NO_SQUARE;
+    m_legalMoves.clear();
+
+    CardGFX::scenes().pop();
+}
+
+void ChessScene::leaveOnlineGame() {
+    if (CardGFX::scenes().active() != this || m_leavingToMenu) return;
+    m_leavingToMenu = true;
+
+    m_exitModal.hide();
+    m_promotionModal.hide();
+    m_gameOverModal.hide();
+    clearNetworkMode();
+    CardGFX::scenes().pop();
+}
+
 void ChessScene::showGameOverModal(const char* title, const char* message) {
     m_uiState = UIState::GameOver;
+    // A terminal result supersedes a transient disconnect warning. Clearing
+    // this flag prevents a recovered packet later in the same tick from
+    // hiding the newly configured result modal.
+    m_disconnectShown = false;
+    m_awaitingAck = false;
     ChessStorage::clearSave();
 
     m_gameOverModal.clearButtons();
@@ -966,17 +1178,22 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
     m_gameOverModal.setMessage(message);
 
     if (m_netMode == NetworkMode::Online) {
-        m_gameOverModal.addButton("Lobby", [this]() {
-            m_gameOverModal.hide();
-            clearNetworkMode();
-            CardGFX::scenes().pop();
-        });
+        m_gameOverModal.setEscapeCallback([this]() { leaveOnlineGame(); });
+        m_gameOverModal.setInputCallback(
+            [this](const InputEvent& event) {
+                if (event.key != 'n' && event.key != 'N') return false;
+                leaveOnlineGame();
+                return true;
+            });
+        m_gameOverModal.addButton("Lobby", [this]() { leaveOnlineGame(); });
     } else {
-        m_gameOverModal.addButton("Menu", [this]() {
-            m_gameOverModal.hide();
-            if (m_aiDifficulty != AIDifficulty::None) clearAIMode();
-            CardGFX::scenes().pop(); // Back to lobby
+        m_gameOverModal.setEscapeCallback([this]() { leaveToMenu(); });
+        m_gameOverModal.setInputCallback([this](const InputEvent& event) {
+            if (event.key != 'n' && event.key != 'N') return false;
+            leaveToMenu();
+            return true;
         });
+        m_gameOverModal.addButton("Menu", [this]() { leaveToMenu(); });
     }
     m_gameOverModal.addButton("Review", [this]() {
         m_gameOverModal.hide();
@@ -1116,7 +1333,8 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     // ── Cursor outline (only when no modal is covering the board) ─
     if (state.cursor &&
         !self->m_promotionModal.isVisible() &&
-        !self->m_gameOverModal.isVisible()) {
+        !self->m_gameOverModal.isVisible() &&
+        !self->m_exitModal.isVisible()) {
         canvas.drawRect(cx, cy, cellW, cellH, theme.gridCursor);
         if (cellW > 4 && cellH > 4) {
             canvas.drawRect(cx + 1, cy + 1, cellW - 2, cellH - 2, theme.gridCursor);
@@ -1294,7 +1512,7 @@ bool ChessScene::loadSavedGame() {
     updateStatusBar();
 
     // Update hint bar for mode
-    m_hintBar.setText("[U]ndo [N]ew");
+    m_hintBar.setText("[U]ndo [Esc]Menu");
 
     // Position cursor on the last move destination or king
     if (!isNoSquare(m_lastTo)) {
@@ -1318,11 +1536,8 @@ void ChessScene::enterReviewMode() {
     m_reviewIndex = m_historyCount;
     m_hintBar.setText("[</>] [ESC]");
     m_movesLabel.setText("Review");
-    if (m_historyCount > 0) {
-        m_moveList.setSelected((m_reviewIndex - 1) / 2);
-    }
     focusChain().focusWidget(&m_boardGrid);
-    updateStatusBar();
+    reviewGoTo(m_reviewIndex);
 }
 
 void ChessScene::exitReviewMode() {
@@ -1332,10 +1547,14 @@ void ChessScene::exitReviewMode() {
     m_movesLabel.setText("Moves");
 
     if (m_preReviewState == UIState::GameOver) {
-        // Re-show game-over modal
-        checkGameEnd();
+        // Re-show the retained result. Re-deriving it from the board would
+        // lose timeout and resignation results, which are not board states.
+        m_gameOverModal.show();
+        focusChain().focusWidget(&m_gameOverModal);
     } else {
-        m_hintBar.setText(m_netMode == NetworkMode::Online ? "[R]esign" : "[U]ndo [N]ew");
+        m_hintBar.setText(m_netMode == NetworkMode::Online
+                              ? "[R]esign"
+                              : "[U]ndo [Esc]Menu");
         focusChain().focusWidget(&m_boardGrid);
     }
     updateStatusBar();
@@ -1446,22 +1665,45 @@ void ChessScene::setTimeControl(TimeControl tc) {
 
 // ── Puzzle Mode ──────────────────────────────────────────────────────
 
-// External function from puzzle_data.cpp
-extern void loadPuzzleIntoBoard(uint16_t index, ChessBoard& board, Move* solution,
-                                uint8_t& solutionLen, PuzzleType& type, uint8_t& rating);
-
 void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
-    m_puzzleMode = true;
+    m_puzzleMode = false;
     m_puzzleIndex = puzzleIndex;
     m_puzzleSolutionStep = 0;
     m_puzzleHintLevel = 0;
     m_puzzleAutoPlayPending = false;
 
     // Load puzzle
-    PuzzleType ptype;
-    uint8_t prating;
-    loadPuzzleIntoBoard(puzzleIndex, m_board, m_puzzleSolution,
-                        m_puzzleSolutionLen, ptype, prating);
+    uint8_t prating = 0;
+    if (!loadPuzzleIntoBoard(puzzleIndex, m_board, m_puzzleSolution,
+                             m_puzzleSolutionLen, m_puzzleType, prating)) {
+        // Do not render or play the previous board with invalid puzzle metadata.
+        // Present a safe exit instead; this also works when called by "Next".
+        m_uiState = UIState::GameOver;
+        m_selectedSquare = NO_SQUARE;
+        m_legalMoves.clear();
+        m_moveAnim.active = false;
+        m_timerRunning = false;
+
+        m_statusBar.setLeft("Puzzle");
+        m_statusBar.setCenter("Unavailable");
+        m_statusBar.setRight("Error");
+        m_hintBar.setText("");
+        m_movesLabel.setText("Puzzle");
+
+        m_gameOverModal.clearButtons();
+        m_gameOverModal.setTitle("Puzzle Error");
+        m_gameOverModal.setMessage("Puzzle unavailable.");
+        m_gameOverModal.addButton("Menu", [this]() {
+            m_gameOverModal.hide();
+            clearPuzzleMode();
+            CardGFX::scenes().pop();
+        });
+        m_gameOverModal.show();
+        focusChain().focusWidget(&m_gameOverModal);
+        m_boardGrid.markDirty();
+        return;
+    }
+    m_puzzleMode = true;
 
     // Load progress
     PuzzleStorage::loadProgress(m_puzzleProgress);
@@ -1491,9 +1733,9 @@ void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
 
     // Status bar
     const char* typeStr = "Puzzle";
-    if (ptype == PuzzleType::MateIn1) typeStr = "Mate in 1";
-    else if (ptype == PuzzleType::MateIn2) typeStr = "Mate in 2";
-    else if (ptype == PuzzleType::Tactic) typeStr = "Tactic";
+    if (m_puzzleType == PuzzleType::MateIn1) typeStr = "Mate in 1";
+    else if (m_puzzleType == PuzzleType::MateIn2) typeStr = "Mate in 2";
+    else if (m_puzzleType == PuzzleType::Tactic) typeStr = "Tactic";
     m_statusBar.setLeft(typeStr);
 
     char centerBuf[24];
@@ -1591,7 +1833,11 @@ void ChessScene::pollNetwork() {
         // Dismiss disconnect modal if we get any packet
         if (m_disconnectShown) {
             m_disconnectShown = false;
-            if (m_gameOverModal.isVisible()) {
+            const bool reviewingFinishedGame =
+                m_uiState == UIState::Reviewing &&
+                m_preReviewState == UIState::GameOver;
+            if (m_gameOverModal.isVisible() &&
+                m_uiState != UIState::GameOver && !reviewingFinishedGame) {
                 m_gameOverModal.hide();
                 focusChain().focusWidget(&m_boardGrid);
             }
@@ -1624,6 +1870,11 @@ void ChessScene::pollNetwork() {
             break;
 
         case NetMsgType::Resign: {
+            if (m_uiState == UIState::GameOver ||
+                (m_uiState == UIState::Reviewing &&
+                 m_preReviewState == UIState::GameOver)) {
+                break;
+            }
             const char* winner = (m_localColor == PieceColor::White)
                                 ? "White wins!" : "Black wins!";
             showGameOverModal("Opponent Resigned", winner);
@@ -1673,6 +1924,14 @@ void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
     // Ignore moves from a different session
     if (msg.sessionId != m_sessionId) return;
 
+    // Once a result has been established, late or queued network moves must
+    // not replace it or mutate a historical board being reviewed.
+    if (m_uiState == UIState::GameOver ||
+        (m_uiState == UIState::Reviewing &&
+         m_preReviewState == UIState::GameOver)) {
+        return;
+    }
+
     // Deduplicate: if we've already applied this move, skip
     if (msg.seq < m_historyCount) return;
 
@@ -1697,7 +1956,12 @@ void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
 }
 
 void ChessScene::onConnectionLost() {
-    if (m_disconnectShown) return;
+    const bool reviewingFinishedGame =
+        m_uiState == UIState::Reviewing && m_preReviewState == UIState::GameOver;
+    if (m_disconnectShown || m_uiState == UIState::GameOver ||
+        reviewingFinishedGame) {
+        return;
+    }
     m_disconnectShown = true;
 
     m_gameOverModal.clearButtons();
@@ -1717,9 +1981,7 @@ void ChessScene::onConnectionLost() {
         focusChain().focusWidget(&m_boardGrid);
     });
     m_gameOverModal.addButton("Quit", [this]() {
-        m_gameOverModal.hide();
-        clearNetworkMode();
-        CardGFX::scenes().pop();
+        leaveOnlineGame();
     });
 
     m_gameOverModal.show();

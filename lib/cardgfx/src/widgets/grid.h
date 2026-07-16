@@ -53,6 +53,10 @@ public:
     )>;
 
     using CellAction = std::function<void(uint8_t col, uint8_t row)>;
+    using CursorNavigation = std::function<bool(
+        uint8_t key, uint8_t currentCol, uint8_t currentRow,
+        uint8_t& nextCol, uint8_t& nextRow
+    )>;
 
     Grid() { m_focusable = true; }
 
@@ -75,6 +79,9 @@ public:
 
     void setCellRenderer(CellRenderer renderer) { m_renderer = renderer; }
     void setOnAction(CellAction action) { m_onAction = action; }
+    void setCursorNavigation(CursorNavigation navigation) {
+        m_cursorNavigation = navigation;
+    }
     void setContext(void* ctx) { m_context = ctx; }
 
     void setDrawBorder(bool draw) { m_drawBorder = draw; }
@@ -213,6 +220,18 @@ public:
     bool onInput(const InputEvent& event) override {
         if (!event.isDown() && !event.isRepeat()) return false;
 
+        const bool isArrow = event.key == Key::UP || event.key == Key::DOWN ||
+                             event.key == Key::LEFT || event.key == Key::RIGHT;
+        if (isArrow && m_cursorNavigation) {
+            uint8_t nextCol = m_cursorCol;
+            uint8_t nextRow = m_cursorRow;
+            if (m_cursorNavigation(event.key, m_cursorCol, m_cursorRow,
+                                   nextCol, nextRow)) {
+                setCursor(nextCol, nextRow);
+                return true;
+            }
+        }
+
         switch (event.key) {
         case Key::UP:
             if (m_cursorRow > 0) { m_cursorRow--; markDirty(); }
@@ -257,6 +276,7 @@ private:
 
     CellRenderer m_renderer = nullptr;
     CellAction   m_onAction = nullptr;
+    CursorNavigation m_cursorNavigation = nullptr;
     void*        m_context  = nullptr;
 };
 

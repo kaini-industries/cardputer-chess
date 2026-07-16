@@ -28,6 +28,7 @@ public:
     static constexpr uint8_t MAX_BTN_LEN    = 24;
 
     using ButtonCallback = std::function<void()>;
+    using InputCallback = std::function<bool(const InputEvent&)>;
 
     Modal() {
         m_focusable = true;
@@ -53,6 +54,10 @@ public:
         m_hasEscapeCallback = (cb != nullptr);
     }
 
+    // Optional modal-specific shortcuts (for example, a documented scene
+    // hotkey). Return true to consume the event before normal button handling.
+    void setInputCallback(InputCallback cb) { m_inputCallback = cb; }
+
     bool addButton(const char* label, ButtonCallback cb) {
         if (m_buttonCount >= MAX_BUTTONS) return false;
         strncpy(m_buttons[m_buttonCount].label, label, MAX_BTN_LEN - 1);
@@ -68,6 +73,7 @@ public:
         m_selectedButton = 0;
         m_escapeCallback = nullptr;
         m_hasEscapeCallback = false;
+        m_inputCallback = nullptr;
         markDirty();
     }
 
@@ -165,6 +171,8 @@ public:
     bool onInput(const InputEvent& event) override {
         if (!event.isDown() && !event.isRepeat()) return false;
 
+        if (m_inputCallback && m_inputCallback(event)) return true;
+
         switch (event.key) {
         case Key::LEFT:
         case Key::UP:
@@ -209,6 +217,7 @@ private:
     uint8_t m_selectedButton = 0;
     ButtonCallback m_escapeCallback = nullptr;
     bool m_hasEscapeCallback = false;
+    InputCallback m_inputCallback = nullptr;
 };
 
 } // namespace CardGFX

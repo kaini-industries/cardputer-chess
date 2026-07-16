@@ -7,6 +7,7 @@
 #include "chess_ai.h"
 #include "chess_net_protocol.h"
 #include "chess_storage.h"
+#include "cursor_navigation.h"
 #include "puzzle_data.h"
 #include "puzzle_storage.h"
 
@@ -40,10 +41,13 @@ private:
         ShowMoves,         // Piece selected, valid moves highlighted
         PromotionPending,  // Waiting for promotion choice
         GameOver,          // Game ended
-        Reviewing          // Stepping through move history
+        Reviewing,         // Stepping through move history
+        ExitConfirm        // Confirming return to the lobby
     };
 
     UIState m_uiState = UIState::SelectPiece;
+    UIState m_preExitState = UIState::SelectPiece;
+    bool m_leavingToMenu = false;
 
     // ── Display Options ──────────────────────────────────────────
     bool m_useSprites = true;   // true=pixel art, false=text letters
@@ -99,9 +103,10 @@ private:
     // ── Puzzle Mode ───────────────────────────────────────────
     bool m_puzzleMode = false;
     uint8_t m_puzzleIndex = 0;
+    PuzzleType m_puzzleType = PuzzleType::Tactic;
     uint8_t m_puzzleSolutionStep = 0;
     uint8_t m_puzzleSolutionLen = 0;
-    Move m_puzzleSolution[4];
+    Move m_puzzleSolution[MAX_PUZZLE_SOLUTION_MOVES];
     PuzzleProgress m_puzzleProgress;
     bool m_puzzleAutoPlayPending = false;
     int32_t m_puzzleAutoPlayDelay = 0;
@@ -137,6 +142,7 @@ private:
     Label     m_hintBar;
     Modal     m_promotionModal;
     Modal     m_gameOverModal;
+    Modal     m_exitModal;
 
     // ── Methods ───────────────────────────────────────────────────
     void newGame();
@@ -152,6 +158,12 @@ private:
     void checkGameEnd();
     void showPromotionModal(const Move& baseMove);
     void showGameOverModal(const char* title, const char* message);
+    void requestExitToMenu();
+    void cancelExitToMenu();
+    void leaveToMenu();
+    void leaveOnlineGame();
+    bool navigateBoardCursor(uint8_t key, uint8_t currentCol, uint8_t currentRow,
+                             uint8_t& nextCol, uint8_t& nextRow);
     void rebuildMoveList();
 
     // Review mode

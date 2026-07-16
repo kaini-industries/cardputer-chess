@@ -1,5 +1,4 @@
 #include "chess_zobrist.h"
-#include <pgmspace.h>
 
 // Deterministic 32-bit random numbers for Zobrist hashing.
 // Generated from LFSR with seed 0x12345678.

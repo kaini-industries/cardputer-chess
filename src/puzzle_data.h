@@ -16,6 +16,8 @@ enum class PuzzleType : uint8_t {
     Tactic   = 2
 };
 
+static constexpr uint8_t MAX_PUZZLE_SOLUTION_MOVES = 4;
+
 class ChessBoard;
 
 // Get the total number of puzzles
@@ -28,8 +30,9 @@ uint16_t puzzleCountByType(PuzzleType type);
 // Returns 0xFFFF if not found.
 uint16_t puzzleIndexByType(PuzzleType type, uint16_t nth);
 
-// Load a puzzle into a ChessBoard, returning solution moves and metadata
-void loadPuzzleIntoBoard(uint16_t index, ChessBoard& board, Move* solution,
+// Load a validated puzzle into a ChessBoard, returning solution moves and metadata.
+// Returns false without changing the board when the index or embedded data is invalid.
+bool loadPuzzleIntoBoard(uint16_t index, ChessBoard& board, Move* solution,
                          uint8_t& solutionLen, PuzzleType& type, uint8_t& rating);
 
 #endif // PUZZLE_DATA_H

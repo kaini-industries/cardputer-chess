@@ -6,7 +6,7 @@ A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI
 
 ## Development Status
 
-The v0.19.0 release addresses the findings from the July 2026 deep technical audit, including board/platform configuration, partition layout, and build pipeline fixes. The standard untimed chess engine has passed canonical move-generation checks. See the [July 2026 deep technical audit](audits/2026-07-14-cardputer-chess-deep-audit.md) for validation evidence, exact source locations, severity rankings, and the recommended remediation order.
+The v0.19.1 release corrects invalid and pre-solved puzzle positions, hardens puzzle validation, restores reliable menu exits from Local and AI games, and adds legal-destination cursor navigation backed by native regression tests. The v0.19.0 audit remediation remains documented in the [July 2026 deep technical audit](audits/2026-07-14-cardputer-chess-deep-audit.md).
 
 ## Features
 
@@ -119,9 +119,9 @@ The host broadcasts a discovery message every 500ms. Joiners see a list of avail
 | **,** or **FN + ,** | Move cursor left |
 | **/** or **FN + /** | Move cursor right |
 | **Enter** or **Space** | Select piece / confirm move |
-| **Esc** (side button) | Deselect piece / cancel |
+| **Esc** (side button) | Deselect a piece; from an idle Local/AI board, open the Leave Game dialog |
 | **U** | Undo last move (local/AI only) |
-| **N** | Return to lobby with confirmation (local/AI only) |
+| **N** | Open the Leave Game dialog immediately (local/AI only) |
 | **R** | Resign with confirmation (online only) |
 | **V** | Enter move review mode |
 | **T** | Toggle between pixel art sprites and letter pieces |
@@ -129,6 +129,10 @@ The host broadcasts a discovery message every 500ms. Joiners see a list of avail
 | **F** | Flip board orientation |
 
 > The Cardputer has no hardware arrow keys. The `;` `,` `.` `/` keys are mapped to arrows at the framework level, so they work as directional controls in all scenes.
+
+After selecting a piece, directional controls jump between its legal destination squares instead of stepping through every board cell. Press **Esc** to return the cursor to the selected piece and cancel the selection.
+
+The Leave Game dialog warns before returning to the lobby; confirming **Menu** discards the current saved game.
 
 ### In Review Mode
 
@@ -139,6 +143,7 @@ Step through the game's move history to analyze past positions.
 | **,** | Step backward one move |
 | **.** | Step forward one move |
 | **Esc** | Exit review mode |
+| **N** | Open the Leave Game dialog during a live Local/AI game |
 
 Review mode is accessible during play (press **V**) or from the game-over dialog via the **Review** button.
 
@@ -152,7 +157,7 @@ Review mode is accessible during play (press **V**) or from the game-over dialog
 
 ### Promotion
 
-When a pawn reaches the back rank, a dialog appears with four choices: Queen, Knight, Rook, Bishop. Use **,** **/** to navigate, **Enter** to confirm.
+When a pawn reaches the back rank, a dialog appears with four choices: Queen, Knight, Rook, Bishop. Use **,** **/** to navigate, **Enter** to confirm, or **Esc** to return to move selection.
 
 ### Game Over
 
@@ -160,6 +165,8 @@ When checkmate, stalemate, 50-move rule, insufficient material, threefold repeti
 
 - **Menu** / **Lobby** — return to the lobby
 - **Review** — enter review mode to step through the game
+
+The side-button **Esc** shortcut returns directly to the lobby from a game-over dialog.
 
 ## Installation
 
@@ -183,7 +190,9 @@ pio run -e cardputer-adv --target upload
 pio device monitor
 ```
 
-The build automatically generates a merged M5Burner-compatible binary at `firmware/cardputer-chess-<version>.bin`.
+The build generates `firmware/cardputer-chess-<version>-m5-burner.bin` for
+M5Burner and `firmware/cardputer-chess-<version>-app.bin` for launcher or manual
+flashing at offset `0x10000`.
 
 ## Project Structure
 
