@@ -16,6 +16,11 @@ static const uint8_t KNIGHT_TABLE[10][2] = {
 };
 
 Chess960Position chess960Generate(uint16_t index) {
+    // There are exactly 960 legal Scharnagl indices. Persisted/user-provided
+    // values are validated by their callers, but keep this pure generator
+    // memory-safe as a final line of defence.
+    if (index >= 960) index = 518;
+
     Chess960Position pos;
     // Track which columns are available
     bool used[8] = {};

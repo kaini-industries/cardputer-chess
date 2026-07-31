@@ -3,10 +3,13 @@
 #include "chess_sprites.h"
 #include "chess_zobrist.h"
 #include "esp_now_transport.h"
+#include "profile_storage.h"
 #include "puzzle_data.h"
+#include "terminal_reliability.h"
 #include <Arduino.h>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 // ── SAN Formatting ───────────────────────────────────────────────────
 // Must be called BEFORE the move is executed on the board.
@@ -124,6 +127,7 @@ void ChessScene::setup() {
     m_boardGrid.setDrawGrid(false);
     m_boardGrid.setCellRenderer(renderCell);
     m_boardGrid.setContext(this);
+    m_boardGrid.setSpaceActivates(false);
     m_boardGrid.setOnAction([this](uint8_t col, uint8_t row) {
         onCellAction(col, row);
     });
@@ -135,7 +139,7 @@ void ChessScene::setup() {
     addWidget(&m_boardGrid, true); // focusable
 
     // ── Moves Label ───────────────────────────────────────────────
-    m_movesLabel.setText("Moves");
+    updateMovesLabel();
     m_movesLabel.setBounds({120, 12, 120, 10});
     m_movesLabel.setAlign(Label::Align::Center);
     m_movesLabel.setDrawBg(true);
@@ -156,19 +160,27 @@ void ChessScene::setup() {
     // ── Promotion Modal ───────────────────────────────────────────
     m_promotionModal.setBounds({0, 0, SCREEN_W, SCREEN_H});
     m_promotionModal.setTitle("Promote to:");
+    m_promotionModal.setSpaceActivates(false);
     m_promotionModal.setVisible(false);
     addWidget(&m_promotionModal, true);
 
     // ── Game Over Modal ───────────────────────────────────────────
     m_gameOverModal.setBounds({0, 0, SCREEN_W, SCREEN_H});
+    m_gameOverModal.setSpaceActivates(false);
     m_gameOverModal.setVisible(false);
     addWidget(&m_gameOverModal, true);
 
     // ── Exit Confirmation Modal ───────────────────────────────────
     // Added last so it draws over every other game widget.
     m_exitModal.setBounds({0, 0, SCREEN_W, SCREEN_H});
+    m_exitModal.setSpaceActivates(false);
     m_exitModal.setVisible(false);
     addWidget(&m_exitModal, true);
+
+    m_actionModal.setBounds({0, 0, SCREEN_W, SCREEN_H});
+    m_actionModal.setSpaceActivates(false);
+    m_actionModal.setVisible(false);
+    addWidget(&m_actionModal, true);
 
     // Start a new game
     newGame();
@@ -176,7 +188,14 @@ void ChessScene::setup() {
 
 void ChessScene::onEnter() {
     m_leavingToMenu = false;
-    if (m_exitModal.isVisible()) {
+    if (m_clock.enabled() && !m_clock.hasStarted() &&
+        m_uiState != UIState::GameOver) {
+        m_clock.start(millis());
+        saveGameState();
+    }
+    if (m_actionModal.isVisible()) {
+        focusChain().focusWidget(&m_actionModal);
+    } else if (m_exitModal.isVisible()) {
         focusChain().focusWidget(&m_exitModal);
     } else if (m_promotionModal.isVisible()) {
         focusChain().focusWidget(&m_promotionModal);
@@ -185,9 +204,16 @@ void ChessScene::onEnter() {
     } else {
         focusChain().focusWidget(&m_boardGrid);
     }
+    updateStatusBar();
 }
 
 void ChessScene::onTick(uint32_t dt_ms) {
+    const bool reviewingFinishedGame =
+        m_uiState == UIState::Reviewing &&
+        m_preReviewState == UIState::GameOver;
+    const bool presentingFinishedGame =
+        m_uiState == UIState::GameOver || reviewingFinishedGame;
+
     // ── Move animation tick ──────────────────────────────────────
     if (m_moveAnim.active) {
         m_moveAnim.elapsed += dt_ms;
@@ -208,28 +234,61 @@ void ChessScene::onTick(uint32_t dt_ms) {
         if (m_exitModal.isVisible()) {
             m_exitModal.markDirty();
         }
-    }
-
-    // ── Timer countdown ──────────────────────────────────────
-    if (m_timeControl != TimeControl::None && m_timerRunning &&
-        m_uiState != UIState::GameOver && m_uiState != UIState::Reviewing &&
-        m_uiState != UIState::ExitConfirm) {
-
-        uint32_t& activeTime = (m_board.sideToMove() == PieceColor::White)
-                               ? m_timeWhiteMs : m_timeBlackMs;
-
-        if (activeTime <= dt_ms) {
-            activeTime = 0;
-            const char* winner = (m_board.sideToMove() == PieceColor::White)
-                                ? "Black wins!" : "White wins!";
-            showGameOverModal("Time's Up!", winner);
-        } else {
-            activeTime -= dt_ms;
+        if (m_actionModal.isVisible()) {
+            m_actionModal.markDirty();
         }
     }
 
+    // ── Timer countdown ──────────────────────────────────────
+    // Apply already-received moves, clock gifts, and terminal events before
+    // evaluating a local flag for this frame.
     if (m_netMode == NetworkMode::Online) {
         pollNetwork();
+    }
+
+    if (m_clock.enabled() && m_clock.hasStarted() &&
+        m_uiState != UIState::GameOver) {
+        const uint32_t now = millis();
+        m_clock.update(now);
+        if (m_clock.hasFlaggedSide()) {
+            const PieceColor flagged = m_clock.flaggedSide();
+            // Each online player is authoritative for their own flag. A zero
+            // projection for the opponent is corrected by a heartbeat or a
+            // terminal control event rather than declared locally.
+            if (m_netMode != NetworkMode::Online || flagged == m_localColor) {
+                if (m_netMode == NetworkMode::Online && m_timeGiftPending) {
+                    // A time gift is committed by the receiver before its ACK.
+                    // Keep the local flag provisional until that transaction is
+                    // resolved so the terminal clock snapshot cannot omit a
+                    // gift that the opponent has already applied.
+                    if (!m_deferredLocalTimeout) {
+                        m_deferredLocalTimeout = true;
+                        m_deferredFlaggedSide = flagged;
+                        m_statusBar.setRight("Confirming +15 sec");
+                    }
+                } else {
+                    const GameOutcome outcome =
+                        flagged == PieceColor::White
+                            ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+                    const char* winner = flagged == PieceColor::White
+                        ? "Black wins!" : "White wins!";
+                    finishGame(outcome, TerminationReason::Timeout,
+                               "Time's Up!", winner, true);
+                }
+            }
+        }
+    }
+
+    if (presentingFinishedGame && !m_resultRecorded &&
+        !m_puzzleMode && m_resultOutcome != GameOutcome::None &&
+        (millis() - m_lastResultSaveAttempt) >= 1000) {
+        recordCompletedGame();
+    }
+
+    if (m_gameSaveDirty && m_netMode == NetworkMode::Local &&
+        !presentingFinishedGame && m_resultOutcome == GameOutcome::None &&
+        (millis() - m_lastGameSaveAttempt) >= 1000) {
+        saveGameState();
     }
 
     // ── Puzzle auto-play opponent response ──────────────────
@@ -304,14 +363,15 @@ bool ChessScene::onInput(const InputEvent& event) {
 
     // Visible modals own input through the focus chain. Keeping this guard also
     // prevents a stale board focus from acting behind an overlay.
-    if (m_exitModal.isVisible() || m_promotionModal.isVisible() ||
-        m_gameOverModal.isVisible()) {
+    if (m_actionModal.isVisible() || m_exitModal.isVisible() ||
+        m_promotionModal.isVisible() || m_gameOverModal.isVisible()) {
         return false;
     }
 
     // Review mode navigation
     if (m_uiState == UIState::Reviewing) {
-        if (event.key == Key::ESCAPE) {
+        if (event.key == Key::ESCAPE || event.key == Key::BACKSPACE ||
+            event.key == Key::DEL) {
             exitReviewMode();
             return true;
         }
@@ -351,14 +411,16 @@ bool ChessScene::onInput(const InputEvent& event) {
             requestExitToMenu();
             return true;
         }
-        if (event.key == Key::ESCAPE) {
+        if (event.key == Key::ESCAPE || event.key == Key::BACKSPACE ||
+            event.key == Key::DEL) {
             if (m_uiState == UIState::ShowMoves) {
                 if (!isNoSquare(m_selectedSquare)) {
                     m_boardGrid.setCursor(toGridCol(m_selectedSquare.col),
                                           toGridRow(m_selectedSquare.row));
                 }
                 deselectPiece();
-            } else if (m_uiState == UIState::SelectPiece) {
+            } else if (m_uiState == UIState::SelectPiece &&
+                       event.key == Key::ESCAPE) {
                 requestExitToMenu();
             }
             return true;
@@ -399,29 +461,45 @@ bool ChessScene::onInput(const InputEvent& event) {
             }
             return true;
         }
-        if (event.key == Key::ESCAPE) {
+        if (event.key == Key::ESCAPE || event.key == Key::BACKSPACE ||
+            event.key == Key::DEL) {
             if (m_uiState == UIState::ShowMoves) {
                 deselectPiece();
                 return true;
             }
-            clearPuzzleMode();
-            CardGFX::scenes().pop();
+            if (event.key == Key::ESCAPE) {
+                clearPuzzleMode();
+                CardGFX::scenes().pop();
+            }
             return true;
         }
         // Block undo/new in puzzle mode — fall through to cell action only
     }
 
     switch (event.key) {
-    case 't':
-    case 'T':
+    case 'b':
+    case 'B':
         m_useSprites = !m_useSprites;
         m_boardGrid.markDirty();
         return true;
 
-    case 'b':
-    case 'B':
+    case 't':
+    case 'T':
         m_bwBoard = !m_bwBoard;
         m_boardGrid.markDirty();
+        return true;
+
+    case 'h':
+    case 'H':
+    case 'i':
+    case 'I':
+        showHelpModal();
+        return true;
+
+    case Key::SPACE:
+        if (m_uiState == UIState::ShowMoves) {
+            cycleLegalMove();
+        }
         return true;
 
     case 'f':
@@ -438,7 +516,14 @@ bool ChessScene::onInput(const InputEvent& event) {
 
     case 'v':
     case 'V':
-        if (m_historyCount > 0 && !m_aiThinking && !m_puzzleMode) {
+        // A live online review would replace m_board with a historical
+        // position while heartbeat and control validation still depend on the
+        // current network position. Online review remains available once the
+        // game is over.
+        if (m_historyCount > 0 && !m_aiThinking && !m_puzzleMode &&
+            m_uiState == UIState::SelectPiece &&
+            m_netMode != NetworkMode::Online &&
+            m_timeControl == TimeControl::None) {
             enterReviewMode();
             return true;
         }
@@ -447,7 +532,11 @@ bool ChessScene::onInput(const InputEvent& event) {
     case 'u':
     case 'U':
         if (m_puzzleMode) break;
-        if (m_netMode != NetworkMode::Online) {
+        // Timed undo would otherwise retain an already-awarded increment and
+        // could be repeated to manufacture clock time. Saved games also do
+        // not retain a per-ply clock ledger, so keep undo strictly untimed.
+        if (m_netMode != NetworkMode::Online &&
+            m_timeControl == TimeControl::None) {
             undoLastMove();
             return true;
         }
@@ -456,32 +545,32 @@ bool ChessScene::onInput(const InputEvent& event) {
     case 'r':
     case 'R':
         if (m_netMode == NetworkMode::Online && m_uiState != UIState::GameOver) {
-            // Resign confirmation
-            m_gameOverModal.setTitle("Resign?");
-            m_gameOverModal.setMessage("Give up this game?");
-            m_gameOverModal.clearButtons();
-            m_gameOverModal.addButton("Yes", [this]() {
-                m_gameOverModal.hide();
-                // Send resign to opponent
-                ResignMsg msg;
-                EspNowTransport::instance().send(
-                    reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
-                // Show result
-                const char* winner = (m_localColor == PieceColor::White)
-                                    ? "Black wins!" : "White wins!";
-                showGameOverModal("Resigned", winner);
-            });
-            m_gameOverModal.addButton("No", [this]() {
-                m_gameOverModal.hide();
-                focusChain().focusWidget(&m_boardGrid);
-            });
-            m_gameOverModal.show();
-            focusChain().focusWidget(&m_gameOverModal);
+            confirmResign();
+            return true;
+        }
+        break;
+
+    case 'd':
+    case 'D':
+        if (m_netMode == NetworkMode::Online &&
+            m_uiState != UIState::GameOver) {
+            offerDraw();
+            return true;
+        }
+        break;
+
+    case 'g':
+    case 'G':
+        if (m_netMode == NetworkMode::Online && m_clock.enabled() &&
+            m_uiState != UIState::GameOver) {
+            giveOpponentTime();
             return true;
         }
         break;
 
     case Key::ESCAPE:
+    case Key::BACKSPACE:
+    case Key::DEL:
         if (m_uiState == UIState::ShowMoves) {
             if (!isNoSquare(m_selectedSquare)) {
                 m_boardGrid.setCursor(toGridCol(m_selectedSquare.col),
@@ -555,6 +644,32 @@ bool ChessScene::navigateBoardCursor(uint8_t key, uint8_t currentCol,
     return true;
 }
 
+void ChessScene::cycleLegalMove() {
+    if (m_uiState != UIState::ShowMoves || m_legalMoves.count == 0) return;
+
+    Square destinations[64];
+    bool seen[8][8] = {};
+    uint8_t destinationCount = 0;
+    for (uint16_t i = 0; i < m_legalMoves.count; ++i) {
+        const Square boardDestination = m_legalMoves.moves[i].to;
+        if (!boardDestination.valid()) continue;
+        const uint8_t gridCol = toGridCol(boardDestination.col);
+        const uint8_t gridRow = toGridRow(boardDestination.row);
+        if (seen[gridRow][gridCol]) continue;
+        seen[gridRow][gridCol] = true;
+        destinations[destinationCount++] = makeSquare(gridCol, gridRow);
+    }
+
+    Square next;
+    if (cycleCursorDestination(destinations, destinationCount,
+                               makeSquare(m_boardGrid.cursorCol(),
+                                          m_boardGrid.cursorRow()),
+                               next)) {
+        m_boardGrid.setCursor(next.col, next.row);
+        updateStatusBar();
+    }
+}
+
 void ChessScene::newGame() {
     // Clear puzzle state (in case we're coming from puzzle mode)
     m_puzzleMode = false;
@@ -565,12 +680,30 @@ void ChessScene::newGame() {
     m_moveAnim.active = false;
     m_moveAnim.pendingFlip = false;
 
-    // Stop timer (setTimeControl will re-init if needed)
-    m_timerRunning = false;
+    m_clock.configure(m_timeControl);
+    m_clockPausedForReview = false;
+    m_clockPausedForExit = false;
+    m_resultOutcome = GameOutcome::None;
+    m_termination = TerminationReason::None;
+    m_resultRecorded = false;
+    m_terminalSummaryReady = false;
+    m_terminalJournaled = false;
+    m_terminalSummary = GameSummary{};
+    m_lastResultSaveAttempt = 0;
+    m_terminalDrainUntil = 0;
+    m_gameSaveDirty = false;
+    m_lastGameSaveAttempt = 0;
+    m_positionEpoch = 0;
+    m_missingRemoteMove = false;
+    m_missingRemoteEpoch = 0;
+    m_missingRemoteMoveSince = 0;
+    m_timeGiftPending = false;
+    m_deferredLocalTimeout = false;
 
     m_board.setVariant(m_variant);
     m_board.setPositionIndex(m_positionIndex);
     m_board.reset();
+    m_reviewBoard = m_board;
     m_uiState = UIState::SelectPiece;
     m_selectedSquare = NO_SQUARE;
     m_lastFrom = NO_SQUARE;
@@ -581,7 +714,7 @@ void ChessScene::newGame() {
     m_legalMoves.clear();
 
     m_moveList.clearItems();
-    m_movesLabel.setText("Moves");
+    updateMovesLabel();
     m_boardGrid.clearAllFlags();
     // Start cursor on the human's king
     uint8_t startRow = 0;
@@ -592,12 +725,7 @@ void ChessScene::newGame() {
     updateStatusBar();
     m_boardGrid.markDirty();
 
-    // Update hint bar for game mode
-    if (m_netMode == NetworkMode::Online) {
-        m_hintBar.setText("[R]esign");
-    } else {
-        m_hintBar.setText("[U]ndo [Esc]Menu");
-    }
+    updateHintBar();
 }
 
 void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
@@ -641,6 +769,11 @@ void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
 }
 
 void ChessScene::selectPiece(uint8_t col, uint8_t boardRow) {
+    if (localMoveBlockedByControl()) {
+        m_statusBar.setRight("Action confirming");
+        return;
+    }
+
     Piece p = m_board.at(col, boardRow);
     if (p.empty() || p.color != m_board.sideToMove()) return;
 
@@ -664,6 +797,7 @@ void ChessScene::selectPiece(uint8_t col, uint8_t boardRow) {
 
     m_uiState = UIState::ShowMoves;
     updateBoardHighlights();
+    updateHintBar();
 }
 
 void ChessScene::deselectPiece() {
@@ -671,6 +805,7 @@ void ChessScene::deselectPiece() {
     m_legalMoves.clear();
     m_uiState = UIState::SelectPiece;
     updateBoardHighlights();
+    updateHintBar();
 }
 
 void ChessScene::tryMove(uint8_t col, uint8_t boardRow) {
@@ -702,6 +837,39 @@ void ChessScene::tryMove(uint8_t col, uint8_t boardRow) {
 }
 
 void ChessScene::executeMove(const Move& move) {
+    if (m_netMode == NetworkMode::Online && !m_applyingRemoteMove &&
+        localMoveBlockedByControl()) {
+        m_statusBar.setRight("Action confirming");
+        return;
+    }
+
+    const PieceColor mover = m_board.sideToMove();
+    const uint32_t moveTimestamp = millis();
+    const uint32_t preBoardHash = ChessZobrist::hash(m_board);
+
+    if (m_clock.enabled() && !m_remoteClockPending) {
+        const ChessClockMoveResult clockResult =
+            m_clock.commitMove(mover, moveTimestamp);
+        if (clockResult != ChessClockMoveResult::Applied) {
+            if (clockResult == ChessClockMoveResult::Flagged) {
+                const PieceColor flagged = m_clock.flaggedSide();
+                if (m_netMode == NetworkMode::Online &&
+                    flagged != m_localColor) {
+                    onConnectionLost("Clock out of sync");
+                    return;
+                }
+                const GameOutcome outcome = flagged == PieceColor::White
+                    ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+                finishGame(outcome, TerminationReason::Timeout,
+                           "Time's Up!",
+                           flagged == PieceColor::White
+                               ? "Black wins!" : "White wins!",
+                           true);
+            }
+            return;
+        }
+    }
+
     // Format SAN before the move is applied (needs pre-move board state)
     bool isCapture = !m_board.at(move.to.col, move.to.row).empty() || move.isEnPassant;
     char sanBuf[12];
@@ -729,27 +897,36 @@ void ChessScene::executeMove(const Move& move) {
         m_board.makeMove(move);
         m_historyOverflow = true; // Can no longer undo safely
     }
+    ++m_positionEpoch;
+    const uint32_t postBoardHash = ChessZobrist::hash(m_board);
+
+    if (m_clock.enabled() && m_remoteClockPending) {
+        ChessClockSnapshot remoteClock;
+        remoteClock.timeControl = m_timeControl;
+        remoteClock.whiteRemainingMs =
+            m_clock.remainingMsAt(PieceColor::White, moveTimestamp);
+        remoteClock.blackRemainingMs =
+            m_clock.remainingMsAt(PieceColor::Black, moveTimestamp);
+        if (mover == PieceColor::White) {
+            remoteClock.whiteRemainingMs = m_remoteMoverRemainingMs;
+        } else {
+            remoteClock.blackRemainingMs = m_remoteMoverRemainingMs;
+        }
+        remoteClock.activeSide = m_board.sideToMove();
+        remoteClock.started = true;
+        remoteClock.paused = false;
+        remoteClock.hasFlaggedSide = false;
+        m_clock.loadSnapshot(remoteClock, moveTimestamp);
+        m_remoteClockPending = false;
+    }
 
     // Track last move for highlighting
     m_lastFrom = move.from;
     m_lastTo = move.to;
 
-    // Start timer after first move
-    if (!m_timerRunning && m_timeControl != TimeControl::None) {
-        m_timerRunning = true;
-    }
-    // Timer: add increment to the player who just moved
-    if (m_timeControl != TimeControl::None && m_timerRunning && m_board.fullmoveNumber() > 1) {
-        auto params = getTimeControlParams(m_timeControl);
-        PieceColor movedSide = opponent(m_board.sideToMove());
-        uint32_t& movedTime = (movedSide == PieceColor::White)
-                              ? m_timeWhiteMs : m_timeBlackMs;
-        movedTime += params.incrementMs;
-    }
-
     // Send move to remote player (only if this was a local move)
     if (m_netMode == NetworkMode::Online && !m_applyingRemoteMove) {
-        sendMove(move);
+        sendMove(move, preBoardHash, postBoardHash);
     }
 
     // Update UI
@@ -851,7 +1028,7 @@ void ChessScene::executeMove(const Move& move) {
     }
 
     // Check for game end
-    checkGameEnd();
+    checkGameEnd(!m_applyingRemoteMove, moveTimestamp);
 
     // Save after each move (checkGameEnd clears save on game over)
     if (m_uiState != UIState::GameOver) {
@@ -866,6 +1043,7 @@ void ChessScene::executeMove(const Move& move) {
 
 void ChessScene::undoLastMove() {
     if (m_netMode == NetworkMode::Online) return; // Disabled in network mode
+    if (m_timeControl != TimeControl::None) return;
     if (m_historyCount == 0) return;
     if (m_historyOverflow) return;
     if (m_uiState == UIState::PromotionPending) return;
@@ -942,8 +1120,11 @@ void ChessScene::updateStatusBar() {
     if (m_timeControl != TimeControl::None) {
         // Show both clocks
         char wBuf[8], bBuf[8];
-        formatTime(wBuf, sizeof(wBuf), m_timeWhiteMs);
-        formatTime(bBuf, sizeof(bBuf), m_timeBlackMs);
+        const uint32_t now = millis();
+        formatTime(wBuf, sizeof(wBuf),
+                   m_clock.remainingMsAt(PieceColor::White, now));
+        formatTime(bBuf, sizeof(bBuf),
+                   m_clock.remainingMsAt(PieceColor::Black, now));
         bool whiteTurn = (m_board.sideToMove() == PieceColor::White);
         snprintf(moveBuf, sizeof(moveBuf), "%s%s %s%s",
                  whiteTurn ? ">" : " ", wBuf,
@@ -977,6 +1158,70 @@ void ChessScene::updateStatusBar() {
         posBuf[2] = '\0';
         m_statusBar.setRight(posBuf);
     }
+}
+
+void ChessScene::updateHintBar() {
+    if (m_uiState == UIState::Reviewing) {
+        m_hintBar.setText("Arrows:ply Esc:back");
+    } else if (m_uiState == UIState::ShowMoves) {
+        m_hintBar.setText("Spc:Next Esc/Del:X");
+    } else if (m_puzzleMode) {
+        m_hintBar.setText("H:Hint S:Skip I:Help");
+    } else if (m_netMode == NetworkMode::Online) {
+        m_hintBar.setText(m_clock.enabled()
+                              ? "D:Draw G:+15 R:Res"
+                              : "D:Draw R:Res H:Help");
+    } else {
+        m_hintBar.setText(m_timeControl == TimeControl::None
+                              ? "U:Undo V:View H:Help"
+                              : "H:Help Esc:Menu");
+    }
+}
+
+void ChessScene::updateMovesLabel() {
+    if (m_netMode == NetworkMode::Online) {
+        char label[32];
+        const char* name = m_opponentName[0] ? m_opponentName : "Player";
+        std::snprintf(label, sizeof(label), "vs %.8s %02X:%02X", name,
+                      m_opponentMac[4], m_opponentMac[5]);
+        m_movesLabel.setText(label);
+    } else {
+        m_movesLabel.setText("Moves");
+    }
+}
+
+void ChessScene::closeActionModal() {
+    m_actionModal.hide();
+    restoreGameInputFocus();
+    updateHintBar();
+    updateStatusBar();
+}
+
+void ChessScene::showHelpModal() {
+    if (m_actionModal.isVisible() || m_uiState == UIState::GameOver ||
+        m_uiState == UIState::PromotionPending ||
+        m_uiState == UIState::ExitConfirm) {
+        return;
+    }
+
+    m_actionModal.clearButtons();
+    m_actionModal.setTitle("Controls");
+    if (m_puzzleMode) {
+        m_actionModal.setMessage(
+            "Enter move\nSpace next legal\nEsc/Del cancel\nH hint  S skip\nB pieces  T theme");
+    } else if (m_netMode == NetworkMode::Online) {
+        m_actionModal.setMessage(m_clock.enabled()
+            ? "Enter move\nSpace next legal\nEsc/Del cancel\nD offer draw\nR resign  G give +15"
+            : "Enter move\nSpace next legal\nEsc/Del cancel\nD offer draw\nR resign  B pieces");
+    } else {
+        m_actionModal.setMessage(m_timeControl == TimeControl::None
+            ? "Enter move\nSpace next legal\nEsc/Del cancel\nB pieces  T theme\nU undo  V review"
+            : "Enter move\nSpace next legal\nEsc/Del cancel\nB pieces  T theme\nEsc menu");
+    }
+    m_actionModal.setEscapeCallback([this]() { closeActionModal(); });
+    m_actionModal.addButton("Close", [this]() { closeActionModal(); });
+    m_actionModal.show();
+    focusChain().focusWidget(&m_actionModal);
 }
 
 void ChessScene::updateBoardHighlights() {
@@ -1027,25 +1272,189 @@ void ChessScene::addMoveToList(const char* san) {
     m_moveList.scrollToBottom();
 }
 
-void ChessScene::checkGameEnd() {
+void ChessScene::checkGameEnd(bool notifyPeer,
+                              uint32_t terminalTimestamp) {
     if (ChessRules::isCheckmate(m_board)) {
-        const char* winner = (m_board.sideToMove() == PieceColor::White)
-                            ? "Black wins!" : "White wins!";
+        const bool whiteLost = m_board.sideToMove() == PieceColor::White;
+        const GameOutcome outcome = whiteLost
+            ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+        const char* winner = whiteLost ? "Black wins!" : "White wins!";
         m_statusBar.setRight("Mate!");
-        showGameOverModal("Checkmate!", winner);
+        finishGame(outcome, TerminationReason::Checkmate,
+                   "Checkmate!", winner, notifyPeer,
+                   terminalTimestamp);
     } else if (ChessRules::isStalemate(m_board)) {
         m_statusBar.setRight("Draw");
-        showGameOverModal("Stalemate!", "Game is a draw.");
+        finishGame(GameOutcome::Draw, TerminationReason::Stalemate,
+                   "Stalemate!", "Game is a draw.", notifyPeer,
+                   terminalTimestamp);
     } else if (ChessRules::isDraw50Move(m_board)) {
         m_statusBar.setRight("Draw");
-        showGameOverModal("50-Move Rule", "Game is a draw.");
+        finishGame(GameOutcome::Draw, TerminationReason::FiftyMove,
+                   "50-Move Rule", "Game is a draw.", notifyPeer,
+                   terminalTimestamp);
     } else if (ChessRules::isInsufficientMaterial(m_board)) {
         m_statusBar.setRight("Draw");
-        showGameOverModal("Insufficient", "Material for mate.");
-    } else if (ChessRules::isThreefoldRepetition(m_board, m_history, m_historyCount)) {
+        finishGame(GameOutcome::Draw,
+                   TerminationReason::InsufficientMaterial,
+                   "Insufficient", "Material for mate.", notifyPeer,
+                   terminalTimestamp);
+    } else if (!m_historyOverflow &&
+               ChessRules::isThreefoldRepetition(
+                   m_board, m_history, m_historyCount)) {
         m_statusBar.setRight("Draw");
-        showGameOverModal("Threefold Rep.", "Game is a draw.");
+        finishGame(GameOutcome::Draw, TerminationReason::Repetition,
+                   "Threefold Rep.", "Game is a draw.", notifyPeer,
+                   terminalTimestamp);
     }
+}
+
+void ChessScene::finishGame(GameOutcome outcome,
+                            TerminationReason termination,
+                            const char* title, const char* message,
+                            bool notifyPeer,
+                            uint32_t terminalTimestamp) {
+    if (m_uiState == UIState::GameOver || m_resultOutcome != GameOutcome::None) {
+        return;
+    }
+
+    const uint32_t now = terminalTimestamp != 0
+        ? terminalTimestamp : millis();
+    if (m_clock.isRunning()) m_clock.pause(now);
+    m_finishDrawOnAck = false;
+    m_clockPausedForDrawAccept = false;
+    m_localDrawOfferEventId = 0;
+    m_localDrawOfferBoardHash = 0;
+    m_remoteDrawOfferEventId = 0;
+    m_resultOutcome = outcome;
+    m_termination = termination;
+    captureTerminalSummary();
+    // Persist an immutable result journal before any cleanup or scene exit.
+    // recordCompletedGame() is idempotent and retries safely from onTick.
+    recordCompletedGame();
+    if (m_netMode == NetworkMode::Online) {
+        // Give the final move/control ACK path a bounded chance to drain
+        // before an immediate Lobby/Escape tears down ESP-NOW.
+        // A draw accept is itself the terminal packet. Keep the receiver
+        // available through the sender's normal five-second retry window so
+        // a lost first ACK cannot leave the two boards disagreeing.
+        m_terminalDrainUntil = now +
+            (termination == TerminationReason::Agreement ? 6000 : 1500);
+    }
+    if (notifyPeer && m_netMode == NetworkMode::Online) {
+        sendGameEnd(outcome, termination);
+    }
+    showGameOverModal(title, message);
+}
+
+void ChessScene::captureTerminalSummary() {
+    if (m_terminalSummaryReady || m_resultOutcome == GameOutcome::None ||
+        m_resultOutcome == GameOutcome::Incomplete) {
+        return;
+    }
+
+    GameSummary& summary = m_terminalSummary;
+    summary = GameSummary{};
+    summary.gameId = m_participants.gameId;
+    if (summary.gameId == 0) {
+        summary.gameId = ChessZobrist::hash(m_board) ^ millis();
+        if (summary.gameId == 0) summary.gameId = 1;
+        m_participants.gameId = summary.gameId;
+    }
+    summary.whiteProfileId = m_participants.whiteProfileId;
+    summary.blackProfileId = m_participants.blackProfileId;
+    std::strncpy(summary.whiteName, m_participants.whiteName,
+                 PLAYER_NAME_MAX);
+    summary.whiteName[PLAYER_NAME_MAX] = '\0';
+    std::strncpy(summary.blackName, m_participants.blackName,
+                 PLAYER_NAME_MAX);
+    summary.blackName[PLAYER_NAME_MAX] = '\0';
+    if (summary.whiteName[0] == '\0') std::strcpy(summary.whiteName, "White");
+    if (summary.blackName[0] == '\0') std::strcpy(summary.blackName, "Black");
+    summary.mode = m_netMode == NetworkMode::Online
+        ? GameMode::Online
+        : (m_aiDifficulty == AIDifficulty::None
+               ? GameMode::Local : GameMode::AI);
+    summary.variant = m_variant;
+    summary.positionIndex = m_positionIndex;
+    summary.timeControl = m_timeControl;
+    summary.aiDifficulty = summary.mode == GameMode::AI
+        ? static_cast<uint8_t>(m_aiDifficulty) : 0;
+    summary.localColor = m_localColor;
+    summary.outcome = m_resultOutcome;
+    summary.termination = m_termination;
+    const uint32_t fullmove = m_board.fullmoveNumber();
+    const uint32_t boardPly = fullmove == 0
+        ? m_historyCount
+        : (fullmove - 1u) * 2u +
+          (m_board.sideToMove() == PieceColor::Black ? 1u : 0u);
+    summary.plyCount = boardPly > std::numeric_limits<uint16_t>::max()
+        ? std::numeric_limits<uint16_t>::max()
+        : static_cast<uint16_t>(boardPly);
+    const ChessClockSnapshot clock = m_clock.snapshot(millis());
+    summary.whiteRemainingMs = clock.whiteRemainingMs;
+    summary.blackRemainingMs = clock.blackRemainingMs;
+    m_terminalSummaryReady = true;
+}
+
+bool ChessScene::recordCompletedGame() {
+    if (m_resultRecorded || m_puzzleMode ||
+        m_resultOutcome == GameOutcome::None ||
+        m_resultOutcome == GameOutcome::Incomplete) {
+        return m_resultRecorded;
+    }
+
+    m_lastResultSaveAttempt = millis();
+    captureTerminalSummary();
+    if (!m_terminalSummaryReady) return false;
+
+    const GameSummary& summary = m_terminalSummary;
+    const ProfileStorage::PendingSaveStatus journalStatus =
+        ProfileStorage::savePendingResult(summary);
+    if (journalStatus != ProfileStorage::PendingSaveStatus::Saved &&
+        journalStatus != ProfileStorage::PendingSaveStatus::AlreadyPresent) {
+        m_statusBar.setRight(
+            journalStatus == ProfileStorage::PendingSaveStatus::Conflict
+                ? "Pending result conflict" : "Result journal failed");
+        return false;
+    }
+    m_terminalJournaled = true;
+
+    ProfileData profiles;
+    const ProfileStorage::LoadStatus profileStatus =
+        ProfileStorage::loadOrCreate(profiles);
+    if (profileStatus != ProfileStorage::LoadStatus::Loaded &&
+        profileStatus != ProfileStorage::LoadStatus::Created) {
+        m_statusBar.setRight("Profiles unavailable");
+        return false;
+    }
+
+    const ProfileStorage::SummaryMatch match =
+        ProfileStorage::findSummary(profiles, summary);
+    if (match == ProfileStorage::SummaryMatch::Conflict) {
+        m_statusBar.setRight("History ID conflict");
+        return false;
+    }
+    if (match == ProfileStorage::SummaryMatch::Missing) {
+        if (!GameRecords::recordCompletedGame(profiles, summary) ||
+            !ProfileStorage::save(profiles)) {
+            m_statusBar.setRight("History save failed");
+            return false;
+        }
+    }
+
+    // Cleanup is deliberately after the exact summary commit. The journal is
+    // the final record erased, so any power loss leaves enough information for
+    // the lobby to resume this same transaction.
+    const bool gameCleared = summary.mode == GameMode::Online ||
+        ChessStorage::clearIfGameId(summary.gameId);
+    if (!gameCleared || !ProfileStorage::clearPendingResult(summary)) {
+        m_statusBar.setRight("Result cleanup pending");
+        return false;
+    }
+
+    m_resultRecorded = true;
+    return true;
 }
 
 void ChessScene::showPromotionModal(const Move& baseMove) {
@@ -1101,6 +1510,8 @@ void ChessScene::requestExitToMenu() {
 
     m_preExitState = m_uiState;
     m_uiState = UIState::ExitConfirm;
+    // A confirmation dialog must not become a pause button in a timed game.
+    m_clockPausedForExit = false;
 
     m_exitModal.clearButtons();
     m_exitModal.setTitle("Leave game?");
@@ -1117,6 +1528,10 @@ void ChessScene::cancelExitToMenu() {
 
     m_exitModal.hide();
     m_uiState = m_preExitState;
+    if (m_clockPausedForExit) {
+        m_clock.resume(millis());
+        m_clockPausedForExit = false;
+    }
     focusChain().focusWidget(&m_boardGrid);
     if (m_uiState == UIState::Reviewing) {
         // Rebuild the historical position and its Review x/y status instead of
@@ -1128,14 +1543,31 @@ void ChessScene::cancelExitToMenu() {
     m_boardGrid.markDirty();
 }
 
-void ChessScene::leaveToMenu() {
+void ChessScene::leaveToMenu(bool discardUnsavedResult) {
     if (CardGFX::scenes().active() != this || m_leavingToMenu) return;
-    m_leavingToMenu = true;
+    if (m_resultOutcome != GameOutcome::None && !m_resultRecorded &&
+        !discardUnsavedResult) {
+        recordCompletedGame();
+        if (!m_resultRecorded && !m_terminalJournaled) {
+            showUnsavedResultModal(false);
+            return;
+        }
+    }
 
+    m_leavingToMenu = true;
     m_exitModal.hide();
     m_promotionModal.hide();
     m_gameOverModal.hide();
-    ChessStorage::clearSave();
+    m_actionModal.hide();
+    if (m_resultOutcome == GameOutcome::None || m_resultRecorded ||
+        discardUnsavedResult) {
+        if (m_resultOutcome == GameOutcome::None || discardUnsavedResult) {
+            ChessStorage::clearIfGameId(m_participants.gameId);
+        }
+        // This sidecar is legacy-only. A guarded exact clear may tidy a known
+        // record, but corrupt/future/unrelated metadata is preserved.
+        ProfileStorage::clearActiveGame(m_participants);
+    }
 
     // Reset transient session state without calling newGame(); queued input is
     // still routed to this scene until the current frame finishes.
@@ -1143,7 +1575,7 @@ void ChessScene::leaveToMenu() {
     m_aiThinking = false;
     m_localColor = PieceColor::White;
     m_boardFlipped = false;
-    m_timerRunning = false;
+    m_clock.configure(TimeControl::None);
     m_moveAnim.active = false;
     m_moveAnim.pendingFlip = false;
     m_uiState = UIState::SelectPiece;
@@ -1153,15 +1585,71 @@ void ChessScene::leaveToMenu() {
     CardGFX::scenes().pop();
 }
 
-void ChessScene::leaveOnlineGame() {
+void ChessScene::leaveOnlineGame(bool force, bool discardUnsavedResult) {
     if (CardGFX::scenes().active() != this || m_leavingToMenu) return;
-    m_leavingToMenu = true;
+    const bool reviewingFinishedGame =
+        m_uiState == UIState::Reviewing &&
+        m_preReviewState == UIState::GameOver;
+    const bool terminalControlPending =
+        (m_controlAwaitingAck &&
+         m_pendingControl.control == NetControlType::GameEnd) ||
+        (m_hasQueuedControl &&
+         m_queuedControl.control == NetControlType::GameEnd);
+    const bool withinTerminalDrain = m_terminalDrainUntil != 0 &&
+        static_cast<int32_t>(millis() - m_terminalDrainUntil) < 0;
+    if (!force &&
+        (m_uiState == UIState::GameOver || reviewingFinishedGame) &&
+        (withinTerminalDrain || terminalControlPending)) {
+        if (m_gameOverModal.isVisible()) {
+            m_gameOverModal.setMessage("Sending result; try again.");
+        } else {
+            m_statusBar.setRight("Sending result...");
+        }
+        return;
+    }
+    if (m_resultOutcome != GameOutcome::None && !m_resultRecorded &&
+        !discardUnsavedResult) {
+        recordCompletedGame();
+        if (!m_resultRecorded && !m_terminalJournaled) {
+            showUnsavedResultModal(true);
+            return;
+        }
+    }
 
+    m_leavingToMenu = true;
     m_exitModal.hide();
     m_promotionModal.hide();
     m_gameOverModal.hide();
+    m_actionModal.hide();
+    // Online sessions never own the local Resume slot or its legacy participant
+    // sidecar, so leaving one must not modify either record.
     clearNetworkMode();
     CardGFX::scenes().pop();
+}
+
+void ChessScene::showUnsavedResultModal(bool online) {
+    m_actionModal.clearButtons();
+    m_actionModal.setTitle("Result Not Saved");
+    m_actionModal.setMessage("Storage is unavailable. Discard this result?");
+    auto stay = [this]() {
+        m_actionModal.hide();
+        if (m_uiState == UIState::Reviewing &&
+            m_preReviewState == UIState::GameOver) {
+            focusChain().focusWidget(&m_boardGrid);
+        } else {
+            m_gameOverModal.show();
+            focusChain().focusWidget(&m_gameOverModal);
+        }
+    };
+    m_actionModal.setEscapeCallback(stay);
+    m_actionModal.addButton("Stay", stay);
+    m_actionModal.addButton("Discard", [this, online]() {
+        m_actionModal.hide();
+        if (online) leaveOnlineGame(true, true);
+        else leaveToMenu(true);
+    });
+    m_actionModal.show();
+    focusChain().focusWidget(&m_actionModal);
 }
 
 void ChessScene::showGameOverModal(const char* title, const char* message) {
@@ -1170,8 +1658,11 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
     // this flag prevents a recovered packet later in the same tick from
     // hiding the newly configured result modal.
     m_disconnectShown = false;
-    m_awaitingAck = false;
-    ChessStorage::clearSave();
+    m_promotionModal.hide();
+    m_exitModal.hide();
+    m_actionModal.hide();
+    m_clockPausedForExit = false;
+    m_clockPausedForReview = false;
 
     m_gameOverModal.clearButtons();
     m_gameOverModal.setTitle(title);
@@ -1195,10 +1686,12 @@ void ChessScene::showGameOverModal(const char* title, const char* message) {
         });
         m_gameOverModal.addButton("Menu", [this]() { leaveToMenu(); });
     }
-    m_gameOverModal.addButton("Review", [this]() {
-        m_gameOverModal.hide();
-        enterReviewMode();
-    });
+    if (!m_historyOverflow) {
+        m_gameOverModal.addButton("Review", [this]() {
+            m_gameOverModal.hide();
+            enterReviewMode();
+        });
+    }
 
     m_gameOverModal.show();
     focusChain().focusWidget(&m_gameOverModal);
@@ -1247,7 +1740,10 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
     canvas.fillRect(cx, cy, cellW, cellH, cellBg);
 
     // ── Valid move dot (on empty highlighted squares) ─────────────
-    Piece piece = self->m_board.at(boardCol, boardRow);
+    const ChessBoard& displayBoard =
+        self->m_uiState == UIState::Reviewing
+            ? self->m_reviewBoard : self->m_board;
+    Piece piece = displayBoard.at(boardCol, boardRow);
     if (state.highlight && piece.empty() && !state.selected) {
         // Small dot in center
         int16_t dotCx = cx + cellW / 2;
@@ -1433,17 +1929,23 @@ void ChessScene::rebuildMoveList() {
 
 // ── Persistence ──────────────────────────────────────────────────────
 
-void ChessScene::saveGameState() {
+bool ChessScene::saveGameState() {
     // Don't save network games (connection can't survive power cycle)
-    if (m_netMode == NetworkMode::Online) return;
+    if (m_netMode == NetworkMode::Online) return true;
 
-    ChessStorage::saveGame(m_board, m_history, m_historyCount,
-                           m_historyOverflow,
-                           m_aiDifficulty, m_aiColor,
-                           m_localColor, m_boardFlipped,
-                           m_variant, m_positionIndex,
-                           m_timeControl, m_timeWhiteMs,
-                           m_timeBlackMs, m_timerRunning);
+    m_lastGameSaveAttempt = millis();
+    const ChessClockSnapshot clock = m_clock.snapshot(millis());
+    const bool saved = ChessStorage::saveGame(
+        m_board, m_history, m_historyCount, m_historyOverflow,
+        m_aiDifficulty, m_aiColor, m_localColor, m_boardFlipped,
+        m_variant, m_positionIndex, m_timeControl,
+        clock.whiteRemainingMs, clock.blackRemainingMs, clock.started,
+        m_participants);
+    m_gameSaveDirty = !saved;
+    if (!saved && m_uiState != UIState::GameOver) {
+        m_statusBar.setRight("Game save failed");
+    }
+    return saved;
 }
 
 bool ChessScene::loadSavedGame() {
@@ -1457,10 +1959,13 @@ bool ChessScene::loadSavedGame() {
     TimeControl tc;
     uint32_t twMs, tbMs;
     bool timerRun;
+    ActiveGameParticipants loadedParticipants;
 
-    if (!ChessStorage::loadGame(m_board, m_history, histCount, histOverflow,
-                                aiDiff, aiCol, localCol, flipped, variant,
-                                posIndex, tc, twMs, tbMs, timerRun)) {
+    const ChessStorage::LoadResult loadResult = ChessStorage::loadGame(
+        m_board, m_history, histCount, histOverflow,
+        aiDiff, aiCol, localCol, flipped, variant,
+        posIndex, tc, twMs, tbMs, timerRun, loadedParticipants);
+    if (loadResult.status != ChessStorage::LoadStatus::Loaded) {
         return false;
     }
 
@@ -1470,9 +1975,19 @@ bool ChessScene::loadSavedGame() {
     m_board.setVariant(variant);
     m_board.setPositionIndex(posIndex);
     m_timeControl = tc;
-    m_timeWhiteMs = twMs;
-    m_timeBlackMs = tbMs;
-    m_timerRunning = timerRun;
+    m_clock.configure(tc);
+    if (tc != TimeControl::None) {
+        ChessClockSnapshot clock;
+        clock.timeControl = tc;
+        clock.whiteRemainingMs = twMs;
+        clock.blackRemainingMs = tbMs;
+        clock.activeSide = m_board.sideToMove();
+        // A timed game resumes with the side-to-move clock active. This also
+        // upgrades older pre-first-move saves to conventional clock behavior.
+        clock.started = true;
+        clock.paused = false;
+        if (!m_clock.loadSnapshot(clock, millis())) return false;
+    }
     m_aiDifficulty = aiDiff;
     m_aiColor = aiCol;
     m_aiThinking = false;
@@ -1483,6 +1998,56 @@ bool ChessScene::loadSavedGame() {
     m_puzzleAutoPlayPending = false;
     m_moveAnim.active = false;
     m_moveAnim.pendingFlip = false;
+    m_resultOutcome = GameOutcome::None;
+    m_termination = TerminationReason::None;
+    m_resultRecorded = false;
+    m_terminalSummaryReady = false;
+    m_terminalJournaled = false;
+    m_terminalSummary = GameSummary{};
+    m_lastResultSaveAttempt = 0;
+    m_gameSaveDirty = false;
+    m_lastGameSaveAttempt = 0;
+    m_clockPausedForReview = false;
+    m_clockPausedForExit = false;
+    if (loadResult.participantsEmbedded) {
+        m_participants = loadedParticipants;
+    } else {
+        // Legacy active_meta was a separate write and cannot be proven to
+        // belong to this board. Attribute the migration only to the currently
+        // loaded profile (when available), otherwise use explicit guest names.
+        m_participants = ActiveGameParticipants{};
+        ProfileData profiles;
+        const PlayerProfile* active =
+            ProfileStorage::load(profiles) ==
+                    ProfileStorage::LoadStatus::Loaded
+                ? GameRecords::activeProfile(profiles) : nullptr;
+        m_participants.valid = true;
+        m_participants.gameId = ChessZobrist::hash(m_board) ^ millis();
+        if (m_participants.gameId == 0) m_participants.gameId = 1;
+        m_participants.mode = aiDiff == AIDifficulty::None
+            ? GameMode::Local : GameMode::AI;
+        if (active) {
+            if (localCol == PieceColor::White) {
+                m_participants.whiteProfileId = active->id;
+                std::strncpy(m_participants.whiteName, active->name,
+                             PLAYER_NAME_MAX);
+            } else {
+                m_participants.blackProfileId = active->id;
+                std::strncpy(m_participants.blackName, active->name,
+                             PLAYER_NAME_MAX);
+            }
+        }
+        if (m_participants.whiteName[0] == '\0') {
+            std::strcpy(m_participants.whiteName,
+                        aiDiff != AIDifficulty::None && aiCol == PieceColor::White
+                            ? "Computer" : "White");
+        }
+        if (m_participants.blackName[0] == '\0') {
+            std::strcpy(m_participants.blackName,
+                        aiDiff != AIDifficulty::None && aiCol == PieceColor::Black
+                            ? "Computer" : "Black");
+        }
+    }
 
     // For local pass-and-play, recalculate flip from sideToMove
     // (saveGameState runs before the pending animation flip completes)
@@ -1491,6 +2056,7 @@ bool ChessScene::loadSavedGame() {
     }
     m_historyCount = histCount;
     m_historyOverflow = histOverflow;
+    m_reviewBoard = m_board;
 
     // Restore UI state
     m_uiState = UIState::SelectPiece;
@@ -1511,8 +2077,7 @@ bool ChessScene::loadSavedGame() {
     updateBoardHighlights();
     updateStatusBar();
 
-    // Update hint bar for mode
-    m_hintBar.setText("[U]ndo [Esc]Menu");
+    updateHintBar();
 
     // Position cursor on the last move destination or king
     if (!isNoSquare(m_lastTo)) {
@@ -1524,6 +2089,12 @@ bool ChessScene::loadSavedGame() {
         }
     }
 
+    if (!loadResult.participantsEmbedded) {
+        // Do not let play continue on a legacy save until its board and
+        // participants have been atomically upgraded to v6.
+        if (!saveGameState()) return false;
+    }
+
     m_boardGrid.markDirty();
     return true;
 }
@@ -1531,10 +2102,52 @@ bool ChessScene::loadSavedGame() {
 // ── Review Mode ──────────────────────────────────────────────────────
 
 void ChessScene::enterReviewMode() {
+    if (m_uiState != UIState::SelectPiece &&
+        m_uiState != UIState::GameOver) {
+        return;
+    }
+    if (m_netMode == NetworkMode::Online &&
+        m_uiState != UIState::GameOver) {
+        m_statusBar.setRight("Review after game");
+        return;
+    }
+    if (m_timeControl != TimeControl::None &&
+        m_uiState != UIState::GameOver) {
+        m_statusBar.setRight("Review after game");
+        return;
+    }
+    if (m_historyOverflow) {
+        m_actionModal.clearButtons();
+        m_actionModal.setTitle("Review Unavailable");
+        m_actionModal.setMessage("This game exceeded the 250-ply review limit.");
+        auto closeUnavailable = [this]() {
+            m_actionModal.hide();
+            if (m_uiState == UIState::GameOver) {
+                m_gameOverModal.show();
+                focusChain().focusWidget(&m_gameOverModal);
+            } else {
+                closeActionModal();
+            }
+        };
+        m_actionModal.setEscapeCallback(closeUnavailable);
+        m_actionModal.addButton("Close", closeUnavailable);
+        m_actionModal.show();
+        focusChain().focusWidget(&m_actionModal);
+        return;
+    }
     m_preReviewState = m_uiState;
+    // Historical boards must not inherit selection/legal-move highlights from
+    // the live position. The normal hotkey already requires SelectPiece; this
+    // also keeps button/programmatic entry defensive.
+    m_selectedSquare = NO_SQUARE;
+    m_legalMoves.clear();
     m_uiState = UIState::Reviewing;
     m_reviewIndex = m_historyCount;
-    m_hintBar.setText("[</>] [ESC]");
+    if (m_netMode != NetworkMode::Online &&
+        m_preReviewState != UIState::GameOver) {
+        m_clockPausedForReview = m_clock.pause(millis());
+    }
+    updateHintBar();
     m_movesLabel.setText("Review");
     focusChain().focusWidget(&m_boardGrid);
     reviewGoTo(m_reviewIndex);
@@ -1544,7 +2157,11 @@ void ChessScene::exitReviewMode() {
     // Restore board to final position
     reviewGoTo(m_historyCount);
     m_uiState = m_preReviewState;
-    m_movesLabel.setText("Moves");
+    updateMovesLabel();
+    if (m_clockPausedForReview && m_preReviewState != UIState::GameOver) {
+        m_clock.resume(millis());
+        m_clockPausedForReview = false;
+    }
 
     if (m_preReviewState == UIState::GameOver) {
         // Re-show the retained result. Re-deriving it from the board would
@@ -1552,15 +2169,14 @@ void ChessScene::exitReviewMode() {
         m_gameOverModal.show();
         focusChain().focusWidget(&m_gameOverModal);
     } else {
-        m_hintBar.setText(m_netMode == NetworkMode::Online
-                              ? "[R]esign"
-                              : "[U]ndo [Esc]Menu");
+        updateHintBar();
         focusChain().focusWidget(&m_boardGrid);
     }
     updateStatusBar();
 }
 
 void ChessScene::reviewGoTo(uint8_t index) {
+    if (index > m_historyCount) index = m_historyCount;
     m_reviewIndex = index;
 
     // Replay from start to index
@@ -1573,17 +2189,7 @@ void ChessScene::reviewGoTo(uint8_t index) {
         tempBoard.makeMove(m_history[i].move);
     }
 
-    // Copy state to display board (preserve variant/960 config)
-    for (uint8_t r = 0; r < 8; r++) {
-        for (uint8_t c = 0; c < 8; c++) {
-            m_board.set(c, r, tempBoard.at(c, r));
-        }
-    }
-    m_board.setSideToMove(tempBoard.sideToMove());
-    m_board.setCastleRights(tempBoard.castleRights());
-    m_board.setEnPassantTarget(tempBoard.enPassantTarget());
-    m_board.setHalfmoveClock(tempBoard.halfmoveClock());
-    m_board.setFullmoveNumber(tempBoard.fullmoveNumber());
+    m_reviewBoard = tempBoard;
 
     // Update last-move markers
     if (index > 0) {
@@ -1598,21 +2204,33 @@ void ChessScene::reviewGoTo(uint8_t index) {
 
     // Update status bar with review position and eval
     char leftBuf[24];
-    snprintf(leftBuf, sizeof(leftBuf), "Review %d/%d", index, m_historyCount);
+    snprintf(leftBuf, sizeof(leftBuf), "Ply %u/%u",
+             static_cast<unsigned>(index),
+             static_cast<unsigned>(m_historyCount));
     m_statusBar.setLeft(leftBuf);
+    m_statusBar.setCenter("");
 
-    int16_t eval = ChessAI::evaluate(m_board);
-    // Convert to white-relative
-    if (m_board.sideToMove() == PieceColor::Black) eval = -eval;
-    char evalBuf[12];
-    if (eval > 9000) {
-        snprintf(evalBuf, sizeof(evalBuf), "M%d", (10001 - eval + 1) / 2);
-    } else if (eval < -9000) {
-        snprintf(evalBuf, sizeof(evalBuf), "-M%d", (10001 + eval + 1) / 2);
+    char evalBuf[16];
+    if (ChessRules::isCheckmate(m_reviewBoard)) {
+        std::snprintf(evalBuf, sizeof(evalBuf), "Mate %c",
+                      m_reviewBoard.sideToMove() == PieceColor::White ? 'B' : 'W');
+    } else if (ChessRules::isStalemate(m_reviewBoard) ||
+               ChessRules::isDraw50Move(m_reviewBoard) ||
+               ChessRules::isInsufficientMaterial(m_reviewBoard) ||
+               ChessRules::isThreefoldRepetition(
+                   m_reviewBoard, m_history, index)) {
+        std::strcpy(evalBuf, "Draw");
     } else {
-        snprintf(evalBuf, sizeof(evalBuf), "%s%d.%02d",
-                 eval >= 0 ? "+" : "", eval / 100,
-                 (eval >= 0 ? eval : -eval) % 100);
+        int16_t eval = ChessAI::evaluate(m_reviewBoard);
+        // The engine evaluates the side to move. Review uses the conventional
+        // White-relative sign so the value has one stable meaning at every ply.
+        if (m_reviewBoard.sideToMove() == PieceColor::Black) eval = -eval;
+        const int32_t magnitude = eval < 0
+            ? -static_cast<int32_t>(eval) : static_cast<int32_t>(eval);
+        std::snprintf(evalBuf, sizeof(evalBuf), "Eval %c%ld.%02ld",
+                      eval < 0 ? '-' : '+',
+                      static_cast<long>(magnitude / 100),
+                      static_cast<long>(magnitude % 100));
     }
     m_statusBar.setRight(evalBuf);
 
@@ -1652,15 +2270,12 @@ void ChessScene::setPositionIndex(uint16_t idx) {
 
 void ChessScene::setTimeControl(TimeControl tc) {
     m_timeControl = tc;
-    if (tc != TimeControl::None) {
-        auto params = getTimeControlParams(tc);
-        m_timeWhiteMs = params.initialMs;
-        m_timeBlackMs = params.initialMs;
-    } else {
-        m_timeWhiteMs = 0;
-        m_timeBlackMs = 0;
-    }
-    m_timerRunning = false;
+    m_clock.configure(tc);
+}
+
+void ChessScene::setParticipants(
+        const ActiveGameParticipants& participants) {
+    m_participants = participants;
 }
 
 // ── Puzzle Mode ──────────────────────────────────────────────────────
@@ -1682,7 +2297,7 @@ void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
         m_selectedSquare = NO_SQUARE;
         m_legalMoves.clear();
         m_moveAnim.active = false;
-        m_timerRunning = false;
+        m_clock.configure(TimeControl::None);
 
         m_statusBar.setLeft("Puzzle");
         m_statusBar.setCenter("Unavailable");
@@ -1719,8 +2334,8 @@ void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
     m_moveList.clearItems();
     m_boardGrid.clearAllFlags();
     m_moveAnim.active = false;
-    m_timerRunning = false;
     m_timeControl = TimeControl::None;
+    m_clock.configure(TimeControl::None);
 
     // Flip board if Black to move
     m_boardFlipped = (m_board.sideToMove() == PieceColor::Black);
@@ -1775,38 +2390,235 @@ void ChessScene::clearAIMode() {
 
 // ── Network Mode ─────────────────────────────────────────────────────
 
-void ChessScene::setNetworkMode(PieceColor localColor, uint16_t sessionId) {
+namespace {
+
+void advanceNonZero(uint16_t& sequence) {
+    ++sequence;
+    if (sequence == 0) sequence = 1;
+}
+
+uint32_t saturatingAddMs(uint32_t value, uint32_t addition) {
+    const uint32_t maximum = std::numeric_limits<uint32_t>::max();
+    return addition > maximum - value ? maximum : value + addition;
+}
+
+NetGameResult toNetResult(GameOutcome outcome) {
+    switch (outcome) {
+        case GameOutcome::WhiteWin: return NetGameResult::WhiteWin;
+        case GameOutcome::BlackWin: return NetGameResult::BlackWin;
+        case GameOutcome::Draw: return NetGameResult::Draw;
+        default: return NetGameResult::None;
+    }
+}
+
+NetTermination toNetTermination(TerminationReason termination) {
+    switch (termination) {
+        case TerminationReason::Checkmate: return NetTermination::Checkmate;
+        case TerminationReason::Timeout: return NetTermination::Timeout;
+        case TerminationReason::Resignation: return NetTermination::Resignation;
+        case TerminationReason::Agreement: return NetTermination::Agreement;
+        case TerminationReason::Stalemate: return NetTermination::Stalemate;
+        case TerminationReason::Repetition: return NetTermination::Repetition;
+        case TerminationReason::FiftyMove: return NetTermination::FiftyMove;
+        case TerminationReason::InsufficientMaterial:
+            return NetTermination::Insufficient;
+        case TerminationReason::Disconnection: return NetTermination::Disconnect;
+        default: return NetTermination::Unknown;
+    }
+}
+
+bool fromNetResult(uint8_t value, GameOutcome& outcome) {
+    switch (static_cast<NetGameResult>(value)) {
+        case NetGameResult::WhiteWin: outcome = GameOutcome::WhiteWin; return true;
+        case NetGameResult::BlackWin: outcome = GameOutcome::BlackWin; return true;
+        case NetGameResult::Draw: outcome = GameOutcome::Draw; return true;
+        default: return false;
+    }
+}
+
+bool fromNetTermination(uint8_t value, TerminationReason& termination) {
+    switch (static_cast<NetTermination>(value)) {
+        case NetTermination::Checkmate:
+            termination = TerminationReason::Checkmate; return true;
+        case NetTermination::Timeout:
+            termination = TerminationReason::Timeout; return true;
+        case NetTermination::Resignation:
+            termination = TerminationReason::Resignation; return true;
+        case NetTermination::Agreement:
+            termination = TerminationReason::Agreement; return true;
+        case NetTermination::Stalemate:
+            termination = TerminationReason::Stalemate; return true;
+        case NetTermination::Repetition:
+            termination = TerminationReason::Repetition; return true;
+        case NetTermination::FiftyMove:
+            termination = TerminationReason::FiftyMove; return true;
+        case NetTermination::Insufficient:
+            termination = TerminationReason::InsufficientMaterial; return true;
+        case NetTermination::Disconnect:
+            termination = TerminationReason::Disconnection; return true;
+        default: return false;
+    }
+}
+
+const char* terminalTitle(TerminationReason termination) {
+    switch (termination) {
+        case TerminationReason::Checkmate: return "Checkmate!";
+        case TerminationReason::Timeout: return "Time's Up!";
+        case TerminationReason::Resignation: return "Opponent Resigned";
+        case TerminationReason::Agreement: return "Draw Agreed";
+        case TerminationReason::Stalemate: return "Stalemate!";
+        case TerminationReason::Repetition: return "Threefold Rep.";
+        case TerminationReason::FiftyMove: return "50-Move Rule";
+        case TerminationReason::InsufficientMaterial: return "Insufficient";
+        default: return "Game Over";
+    }
+}
+
+} // namespace
+
+void ChessScene::setNetworkMode(PieceColor localColor, uint32_t sessionId,
+                                uint16_t gameId,
+                                const uint8_t opponentMac[6],
+                                const char* localName,
+                                const char* opponentName,
+                                bool reackGameStart) {
     m_netMode = NetworkMode::Online;
     m_localColor = localColor;
     m_sessionId = sessionId;
+    m_networkGameId = gameId;
+    if (opponentMac) std::memcpy(m_opponentMac, opponentMac, 6);
+    else std::memset(m_opponentMac, 0, sizeof(m_opponentMac));
+    copyNetDisplayName(m_opponentName, opponentName);
+    if (m_opponentName[0] == '\0') std::strcpy(m_opponentName, "Player");
+    m_reackGameStart = reackGameStart;
     m_boardFlipped = (localColor == PieceColor::Black);
     m_awaitingAck = false;
-    m_retryCount = 0;
+    m_nextMoveSequence = 1;
+    m_lastSentSeq = 0;
+    m_expectedRemoteSequence = 1;
+    m_lastAppliedRemoteSequence = 0;
+    m_lastRemotePreHash = 0;
+    m_lastRemotePostHash = 0;
+    m_lastMoveSendTime = millis();
+    m_lastHeartbeatSendTime = 0;
+    m_moveRetryCount = 0;
+    m_controlAwaitingAck = false;
+    m_pendingControl = ControlNetMsg{};
+    m_nextControlEventId = 1;
+    m_expectedRemoteControlEventId = 1;
+    m_lastRemoteControlEventId = 0;
+    m_lastRemoteControl = ControlNetMsg{};
+    m_lastRemoteControlStatus = NetAckStatus::Rejected;
+    m_localDrawOfferEventId = 0;
+    m_localDrawOfferBoardHash = 0;
+    m_remoteDrawOfferEventId = 0;
+    m_lastLocalDrawAcceptEventId = 0;
+    m_finishDrawOnAck = false;
+    m_clockPausedForDrawAccept = false;
+    m_controlRetryCount = 0;
+    m_hasQueuedControl = false;
+    m_queuedControl = ControlNetMsg{};
+    m_remoteClockPending = false;
     m_disconnectShown = false;
+    m_disconnectGraceUntil = 0;
+    m_lastValidPeerPacketTime = millis();
+
+    char localDisplay[PLAYER_NAME_MAX + 1] = {};
+    if (!GameRecords::sanitizeName(localName, localDisplay)) {
+        std::strcpy(localDisplay, "Player");
+    }
+    ProfileData profiles;
+    const bool profilesLoaded =
+        ProfileStorage::load(profiles) == ProfileStorage::LoadStatus::Loaded;
+    const PlayerProfile* active = profilesLoaded
+        ? GameRecords::activeProfile(profiles) : nullptr;
+    // A profile ID is meaningful only if it belongs to the exact identity
+    // advertised during pairing. Never attach stale metadata to a new session.
+    if (active && std::strcmp(active->name, localDisplay) != 0) active = nullptr;
+    m_participants = ActiveGameParticipants{};
+    m_participants.valid = sessionId != 0;
+    m_participants.gameId = sessionId;
+    m_participants.mode = GameMode::Online;
+    if (localColor == PieceColor::White) {
+        if (active) {
+            m_participants.whiteProfileId = active->id;
+        }
+        std::strncpy(m_participants.whiteName, localDisplay,
+                     PLAYER_NAME_MAX);
+        std::strncpy(m_participants.blackName, m_opponentName,
+                     PLAYER_NAME_MAX);
+    } else {
+        std::strncpy(m_participants.whiteName, m_opponentName,
+                     PLAYER_NAME_MAX);
+        if (active) {
+            m_participants.blackProfileId = active->id;
+        }
+        std::strncpy(m_participants.blackName, localDisplay,
+                     PLAYER_NAME_MAX);
+    }
+    m_participants.whiteName[PLAYER_NAME_MAX] = '\0';
+    m_participants.blackName[PLAYER_NAME_MAX] = '\0';
     newGame();
 }
 
 void ChessScene::clearNetworkMode() {
+    EspNowTransport::instance().shutdown();
     m_netMode = NetworkMode::Local;
     m_localColor = PieceColor::White;
     m_boardFlipped = false;
     m_applyingRemoteMove = false;
+    m_remoteClockPending = false;
     m_awaitingAck = false;
+    m_controlAwaitingAck = false;
+    m_pendingControl = ControlNetMsg{};
     m_disconnectShown = false;
+    m_networkGameId = 0;
+    m_sessionId = 0;
+    std::memset(m_opponentMac, 0, sizeof(m_opponentMac));
+    std::memset(m_opponentName, 0, sizeof(m_opponentName));
+    m_reackGameStart = false;
+    m_nextMoveSequence = 1;
     m_lastSentSeq = 0;
-    m_lastSendTime = 0;
-    m_retryCount = 0;
+    m_expectedRemoteSequence = 1;
+    m_lastAppliedRemoteSequence = 0;
+    m_nextControlEventId = 1;
+    m_expectedRemoteControlEventId = 1;
+    m_lastRemoteControlEventId = 0;
+    m_lastRemoteControl = ControlNetMsg{};
+    m_lastRemoteControlStatus = NetAckStatus::Rejected;
+    m_localDrawOfferEventId = 0;
+    m_localDrawOfferBoardHash = 0;
+    m_remoteDrawOfferEventId = 0;
+    m_lastLocalDrawAcceptEventId = 0;
+    m_finishDrawOnAck = false;
+    m_clockPausedForDrawAccept = false;
+    m_lastMoveSendTime = 0;
+    m_lastHeartbeatSendTime = 0;
+    m_lastControlSendTime = 0;
+    m_moveRetryCount = 0;
+    m_controlRetryCount = 0;
+    m_hasQueuedControl = false;
+    m_queuedControl = ControlNetMsg{};
     m_disconnectGraceUntil = 0;
+    m_lastValidPeerPacketTime = 0;
+    m_participants = ActiveGameParticipants{};
     newGame();
 }
 
-void ChessScene::sendMove(const Move& move) {
-    uint8_t seq = (uint8_t)(m_historyCount); // Use history count as sequence
-    m_lastSentMove = moveToNetMsg(move, seq, m_sessionId);
-    m_lastSentSeq = seq;
+void ChessScene::sendMove(const Move& move, uint32_t preBoardHash,
+                          uint32_t postBoardHash) {
+    const uint16_t sequence = m_nextMoveSequence;
+    advanceNonZero(m_nextMoveSequence);
+    const uint32_t moverRemaining = m_clock.enabled()
+        ? m_clock.remainingMs(opponent(m_board.sideToMove())) : 0;
+    m_lastSentMove = moveToNetMsg(
+        move, sequence, m_networkGameId, m_sessionId,
+        moverRemaining, preBoardHash, postBoardHash);
+    m_lastSentSeq = sequence;
+    m_lastSentPostHash = postBoardHash;
     m_awaitingAck = true;
-    m_retryCount = 0;
-    m_lastSendTime = millis();
+    m_moveRetryCount = 0;
+    m_lastMoveSendTime = millis();
 
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&m_lastSentMove), sizeof(m_lastSentMove));
@@ -1814,70 +2626,334 @@ void ChessScene::sendMove(const Move& move) {
 
 void ChessScene::sendHeartbeat() {
     HeartbeatMsg hb;
-    hb.sessionId = m_sessionId;
+    hb.header.gameId = m_networkGameId;
+    hb.header.sessionId = m_sessionId;
+    hb.activeColor = static_cast<uint8_t>(m_board.sideToMove());
+    hb.activeRemainingMs = m_clock.enabled()
+        ? m_clock.remainingMsAt(m_board.sideToMove(), millis()) : 0;
+    hb.positionEpoch = m_positionEpoch;
+    hb.lastAppliedSequence = m_lastAppliedRemoteSequence;
+    hb.boardHash = ChessZobrist::hash(m_board);
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&hb), sizeof(hb));
 }
 
+void ChessScene::sendGameStartAck() {
+    GameStartAckMsg ack;
+    ack.header.gameId = m_networkGameId;
+    ack.header.sessionId = m_sessionId;
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+}
+
+void ChessScene::sendMoveAck(const MoveNetMsg& msg, NetAckStatus status,
+                             uint32_t boardHash) {
+    MoveAckMsg ack;
+    ack.header.gameId = m_networkGameId;
+    ack.header.sessionId = m_sessionId;
+    ack.sequence = msg.sequence;
+    ack.status = status;
+    ack.boardHash = boardHash;
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+}
+
 void ChessScene::pollNetwork() {
     auto& transport = EspNowTransport::instance();
-    uint32_t now = millis();
+    const uint32_t now = millis();
 
-    // Process received packets
-    uint8_t buf[32];
+    uint8_t buf[NET_PACKET_MAX_SIZE];
     uint8_t mac[6];
     while (transport.hasReceived()) {
-        uint8_t len = transport.receive(buf, sizeof(buf), mac);
+        const uint8_t len = transport.receive(buf, sizeof(buf), mac);
         if (len == 0) break;
+        if (!transport.isPeerMac(mac)) continue;
 
-        // Dismiss disconnect modal if we get any packet
-        if (m_disconnectShown) {
-            m_disconnectShown = false;
-            const bool reviewingFinishedGame =
-                m_uiState == UIState::Reviewing &&
-                m_preReviewState == UIState::GameOver;
-            if (m_gameOverModal.isVisible() &&
-                m_uiState != UIState::GameOver && !reviewingFinishedGame) {
-                m_gameOverModal.hide();
-                focusChain().focusWidget(&m_boardGrid);
-            }
-        }
-
-        auto msgType = static_cast<NetMsgType>(buf[0]);
+        const NetMsgType msgType = static_cast<NetMsgType>(buf[0]);
 
         switch (msgType) {
         case NetMsgType::MoveMsg:
-            if (len >= sizeof(MoveNetMsg)) {
+            if (len == sizeof(MoveNetMsg)) {
                 MoveNetMsg moveMsg;
-                memcpy(&moveMsg, buf, sizeof(MoveNetMsg));
-                onRemoteMoveReceived(moveMsg);
-            }
-            break;
-
-        case NetMsgType::MoveAck:
-            if (len >= sizeof(MoveAckMsg)) {
-                MoveAckMsg ack;
-                memcpy(&ack, buf, sizeof(MoveAckMsg));
-                if (m_awaitingAck && ack.seq == m_lastSentSeq &&
-                    ack.sessionId == m_sessionId) {
-                    m_awaitingAck = false;
+                memcpy(&moveMsg, buf, sizeof(moveMsg));
+                if (isValidGameHeader(moveMsg.header, NetMsgType::MoveMsg,
+                                      m_networkGameId, m_sessionId)) {
+                    noteValidPeerPacket(now);
+                    onRemoteMoveReceived(moveMsg);
                 }
             }
             break;
 
-        case NetMsgType::Heartbeat:
-            // Just the receive timestamp update is enough
+        case NetMsgType::MoveAck:
+            if (len == sizeof(MoveAckMsg)) {
+                MoveAckMsg ack;
+                memcpy(&ack, buf, sizeof(ack));
+                if (isValidGameHeader(ack.header, NetMsgType::MoveAck,
+                                      m_networkGameId, m_sessionId) &&
+                    m_awaitingAck && ack.sequence == m_lastSentSeq) {
+                    noteValidPeerPacket(now);
+                    if ((ack.status == NetAckStatus::Accepted ||
+                         ack.status == NetAckStatus::Duplicate) &&
+                        ack.boardHash == m_lastSentPostHash) {
+                        m_awaitingAck = false;
+                    } else if (ack.status == NetAckStatus::Accepted ||
+                               ack.status == NetAckStatus::Duplicate) {
+                        m_awaitingAck = false;
+                        onConnectionLost("Game out of sync");
+                    } else if (ack.status == NetAckStatus::Rejected) {
+                        m_awaitingAck = false;
+                        onConnectionLost("Game out of sync");
+                    }
+                }
+            }
+            break;
+
+        case NetMsgType::Heartbeat: {
+            if (len != sizeof(HeartbeatMsg)) break;
+            HeartbeatMsg heartbeat;
+            memcpy(&heartbeat, buf, sizeof(heartbeat));
+            if (!isValidGameHeader(heartbeat.header, NetMsgType::Heartbeat,
+                                   m_networkGameId, m_sessionId) ||
+                !isValidColorValue(heartbeat.activeColor)) {
+                break;
+            }
+            noteValidPeerPacket(now);
+            const uint32_t boardHash = ChessZobrist::hash(m_board);
+            const NetPositionRelation relation = classifyNetPosition(
+                m_positionEpoch, boardHash,
+                heartbeat.positionEpoch, heartbeat.boardHash);
+            if (relation == NetPositionRelation::Match) {
+                // If a newer heartbeat already proved the peer is one move
+                // ahead, this exact-position heartbeat is merely reordered
+                // stale traffic. Only receipt of the expected Move may clear
+                // that causal deadline.
+                if (m_awaitingAck &&
+                    heartbeat.lastAppliedSequence == m_lastSentSeq &&
+                    boardHash == m_lastSentPostHash) {
+                    m_awaitingAck = false;
+                }
+                const PieceColor active =
+                    static_cast<PieceColor>(heartbeat.activeColor);
+                const bool reviewingFinishedGame =
+                    m_uiState == UIState::Reviewing &&
+                    m_preReviewState == UIState::GameOver;
+                if (m_resultOutcome == GameOutcome::None &&
+                    !reviewingFinishedGame && m_clock.enabled() &&
+                    active == opponent(m_localColor) &&
+                    active == m_board.sideToMove() &&
+                    m_uiState != UIState::GameOver) {
+                    m_clock.setRemainingMs(active,
+                                           heartbeat.activeRemainingMs, now);
+                    updateStatusBar();
+                }
+            } else if (relation == NetPositionRelation::PeerAheadOne) {
+                if (!m_missingRemoteMove ||
+                    m_missingRemoteEpoch != heartbeat.positionEpoch) {
+                    m_missingRemoteMove = true;
+                    m_missingRemoteEpoch = heartbeat.positionEpoch;
+                    m_missingRemoteMoveSince = now;
+                }
+            } else if (relation == NetPositionRelation::Diverged &&
+                       m_uiState != UIState::GameOver) {
+                onConnectionLost("Game out of sync");
+            }
+            break;
+        }
+
+        case NetMsgType::ControlMsg:
+            if (len == sizeof(ControlNetMsg)) {
+                ControlNetMsg control;
+                memcpy(&control, buf, sizeof(control));
+                if (isValidGameHeader(control.header,
+                                      NetMsgType::ControlMsg,
+                                      m_networkGameId, m_sessionId)) {
+                    noteValidPeerPacket(now);
+                    onControlReceived(control);
+                }
+            }
+            break;
+
+        case NetMsgType::ControlAck:
+            if (len == sizeof(ControlAckMsg)) {
+                ControlAckMsg ack;
+                memcpy(&ack, buf, sizeof(ack));
+                if (isValidGameHeader(ack.header, NetMsgType::ControlAck,
+                                      m_networkGameId, m_sessionId) &&
+                    m_controlAwaitingAck &&
+                    ack.eventId == m_pendingControl.eventId &&
+                    ack.control == m_pendingControl.control) {
+                    noteValidPeerPacket(now);
+                    if (ack.status == NetAckStatus::Accepted ||
+                        ack.status == NetAckStatus::Duplicate) {
+                        const bool completesTimeGift =
+                            m_timeGiftPending &&
+                            m_pendingControl.control ==
+                                NetControlType::TimeGift;
+                        if (completesTimeGift &&
+                            (ack.boardHash != m_pendingControl.boardHash ||
+                             ack.clockRemainingMs == 0)) {
+                            // Do not guess whether the remote side committed the
+                            // gift. Preserve the immutable pending packet so a
+                            // deliberate Wait can retry it.
+                            m_controlAwaitingAck = false;
+                            onConnectionLost("Gift confirmation mismatch");
+                            break;
+                        }
+                        const bool completesTerminalReceipt =
+                            m_pendingControl.control ==
+                                NetControlType::GameEnd;
+                        const bool completesDraw =
+                            m_finishDrawOnAck &&
+                            m_pendingControl.control ==
+                                NetControlType::DrawAccept &&
+                            ack.boardHash == m_pendingControl.boardHash;
+                        m_controlAwaitingAck = false;
+                        if (completesTimeGift) {
+                            m_clock.setRemainingMs(
+                                m_timeGiftRecipient,
+                                ack.clockRemainingMs, now);
+                            m_timeGiftPending = false;
+                            m_pendingControl = ControlNetMsg{};
+                            updateStatusBar();
+                            m_statusBar.setRight("Gave +15 sec");
+                            sendQueuedControl();
+                            finishDeferredTimeoutIfReady();
+                        } else if (completesDraw) {
+                            m_pendingControl = ControlNetMsg{};
+                            m_finishDrawOnAck = false;
+                            m_clockPausedForDrawAccept = false;
+                            finishGame(GameOutcome::Draw,
+                                       TerminationReason::Agreement,
+                                       "Draw Agreed", "Game is a draw.",
+                                       false);
+                        } else if (m_finishDrawOnAck &&
+                                   m_pendingControl.control ==
+                                       NetControlType::DrawAccept) {
+                            m_finishDrawOnAck = false;
+                            m_pendingControl = ControlNetMsg{};
+                            if (m_clockPausedForDrawAccept) {
+                                m_clock.resume(now);
+                                m_clockPausedForDrawAccept = false;
+                            }
+                            onConnectionLost("Draw confirmation mismatch");
+                        } else {
+                            m_pendingControl = ControlNetMsg{};
+                            sendQueuedControl();
+                            if (completesTerminalReceipt) {
+                                m_terminalDrainUntil = now;
+                                if (m_actionModal.isVisible()) {
+                                    m_actionModal.hide();
+                                    if (m_uiState == UIState::Reviewing &&
+                                        m_preReviewState ==
+                                            UIState::GameOver) {
+                                        focusChain().focusWidget(&m_boardGrid);
+                                    } else {
+                                        focusChain().focusWidget(
+                                            &m_gameOverModal);
+                                    }
+                                }
+                            }
+                        }
+                    } else if (ack.status == NetAckStatus::Rejected) {
+                        const bool rejectedTimeGift =
+                            m_timeGiftPending &&
+                            m_pendingControl.control ==
+                                NetControlType::TimeGift;
+                        // GameEnd can legitimately beat its final move through
+                        // the radio. Keep retrying until the board hashes match.
+                        if (m_pendingControl.control !=
+                                NetControlType::GameEnd &&
+                            m_hasQueuedControl &&
+                            m_queuedControl.control ==
+                                NetControlType::GameEnd) {
+                            if (m_pendingControl.control ==
+                                NetControlType::DrawOffer) {
+                                // Stale draw offers are consumed by the peer,
+                                // so its stream now expects our next event ID.
+                                m_controlAwaitingAck = false;
+                                m_localDrawOfferEventId = 0;
+                                m_localDrawOfferBoardHash = 0;
+                                m_pendingControl = ControlNetMsg{};
+                                sendQueuedControl();
+                                break;
+                            }
+                            // Rejection does not advance the receiver's event
+                            // sequence. Reuse this event ID for the terminal
+                            // packet so the game result cannot be stranded
+                            // behind a rejected draw/time action.
+                            m_controlAwaitingAck = false;
+                            sendQueuedControl(true);
+                        } else if (m_pendingControl.control ==
+                                   NetControlType::DrawOffer) {
+                            m_controlAwaitingAck = false;
+                            m_localDrawOfferEventId = 0;
+                            m_localDrawOfferBoardHash = 0;
+                            m_pendingControl = ControlNetMsg{};
+                            m_statusBar.setRight("Draw offer expired");
+                            sendQueuedControl();
+                        } else if (m_pendingControl.control !=
+                                   NetControlType::GameEnd) {
+                            if (m_pendingControl.control ==
+                                NetControlType::DrawOffer) {
+                                m_localDrawOfferEventId = 0;
+                                m_localDrawOfferBoardHash = 0;
+                            }
+                            if (m_finishDrawOnAck) {
+                                m_finishDrawOnAck = false;
+                                if (m_clockPausedForDrawAccept) {
+                                    m_clock.resume(now);
+                                    m_clockPausedForDrawAccept = false;
+                                }
+                            }
+                            m_controlAwaitingAck = false;
+                            m_hasQueuedControl = false;
+                            m_pendingControl = ControlNetMsg{};
+                            if (m_uiState != UIState::GameOver) {
+                                onConnectionLost("Action rejected");
+                            }
+                        }
+                        if (rejectedTimeGift) {
+                            m_timeGiftPending = false;
+                            finishDeferredTimeoutIfReady();
+                        }
+                    }
+                }
+            }
+            break;
+
+        case NetMsgType::GameStart:
+            if (m_reackGameStart && len == sizeof(GameStartMsg)) {
+                GameStartMsg start;
+                memcpy(&start, buf, sizeof(start));
+                if (isValidGameHeader(start.header, NetMsgType::GameStart,
+                                      m_networkGameId, m_sessionId) &&
+                    start.yourColor == static_cast<uint8_t>(m_localColor) &&
+                    start.variant == static_cast<uint8_t>(m_variant) &&
+                    start.positionIndex == m_positionIndex &&
+                    start.timeControl == static_cast<uint8_t>(m_timeControl)) {
+                    noteValidPeerPacket(now);
+                    sendGameStartAck();
+                }
+            }
             break;
 
         case NetMsgType::Resign: {
-            if (m_uiState == UIState::GameOver ||
-                (m_uiState == UIState::Reviewing &&
-                 m_preReviewState == UIState::GameOver)) {
-                break;
+            if (len == sizeof(ResignMsg)) {
+                ResignMsg resign;
+                memcpy(&resign, buf, sizeof(resign));
+                if (isValidGameHeader(resign.header, NetMsgType::Resign,
+                                      m_networkGameId, m_sessionId)) {
+                    noteValidPeerPacket(now);
+                    const GameOutcome outcome =
+                        m_localColor == PieceColor::White
+                            ? GameOutcome::WhiteWin : GameOutcome::BlackWin;
+                    finishGame(outcome, TerminationReason::Resignation,
+                               "Opponent Resigned",
+                               m_localColor == PieceColor::White
+                                   ? "White wins!" : "Black wins!",
+                               false);
+                }
             }
-            const char* winner = (m_localColor == PieceColor::White)
-                                ? "White wins!" : "Black wins!";
-            showGameOverModal("Opponent Resigned", winner);
             break;
         }
 
@@ -1886,76 +2962,721 @@ void ChessScene::pollNetwork() {
         }
     }
 
-    // Retransmit unacked moves
-    if (m_awaitingAck && (now - m_lastSendTime) > 200) {
-        m_retryCount++;
-        if (m_retryCount > 25) { // ~5 seconds
+    if (m_awaitingAck && (now - m_lastMoveSendTime) > 200) {
+        ++m_moveRetryCount;
+        if (m_moveRetryCount > 25) {
             m_awaitingAck = false;
             onConnectionLost();
         } else {
-            m_lastSendTime = now;
+            m_lastMoveSendTime = now;
             transport.send(
                 reinterpret_cast<const uint8_t*>(&m_lastSentMove),
                 sizeof(m_lastSentMove));
         }
     }
 
-    // Send heartbeat every second when idle
-    if (!m_awaitingAck && (now - m_lastSendTime) > 1000) {
-        m_lastSendTime = now;
+    const bool hasTerminalGameEnd =
+        m_pendingControl.control == NetControlType::GameEnd ||
+        (m_hasQueuedControl &&
+         m_queuedControl.control == NetControlType::GameEnd);
+    const bool drainingTerminalControl =
+        hasTerminalGameEnd || m_finishDrawOnAck;
+    const uint32_t controlRetryInterval =
+        drainingTerminalControl && m_controlRetryCount >= 25 ? 1000 : 200;
+    if (m_controlAwaitingAck &&
+        (now - m_lastControlSendTime) > controlRetryInterval) {
+        if (m_controlRetryCount < 255) ++m_controlRetryCount;
+        if (m_controlRetryCount == 25 && m_finishDrawOnAck) {
+            m_actionModal.clearButtons();
+            m_actionModal.setTitle("Draw Pending");
+            m_actionModal.setMessage("No confirmation yet.");
+            auto keepWaitingForDraw = [this]() {
+                m_controlRetryCount = 0;
+                m_lastControlSendTime = millis();
+                m_actionModal.clearButtons();
+                m_actionModal.setTitle("Draw Agreement");
+                m_actionModal.setMessage("Confirming with opponent...");
+                m_actionModal.setEscapeCallback([]() {});
+                focusChain().focusWidget(&m_actionModal);
+            };
+            m_actionModal.setEscapeCallback(keepWaitingForDraw);
+            m_actionModal.addButton("Keep Waiting", keepWaitingForDraw);
+            m_actionModal.addButton("Quit", [this]() {
+                leaveOnlineGame();
+            });
+            m_actionModal.show();
+            focusChain().focusWidget(&m_actionModal);
+        } else if (m_controlRetryCount >= 25 &&
+                   hasTerminalGameEnd &&
+                   (m_uiState == UIState::GameOver ||
+                    (m_uiState == UIState::Reviewing &&
+                     m_preReviewState == UIState::GameOver)) &&
+                   !m_actionModal.isVisible()) {
+            m_actionModal.clearButtons();
+            m_actionModal.setTitle("Result Pending");
+            m_actionModal.setMessage("Waiting for opponent receipt.");
+            auto keepWaitingForResult = [this]() {
+                m_actionModal.hide();
+                m_controlRetryCount = 0;
+                m_lastControlSendTime = millis();
+                if (m_uiState == UIState::Reviewing &&
+                    m_preReviewState == UIState::GameOver) {
+                    focusChain().focusWidget(&m_boardGrid);
+                } else {
+                    focusChain().focusWidget(&m_gameOverModal);
+                }
+            };
+            m_actionModal.setEscapeCallback(keepWaitingForResult);
+            m_actionModal.addButton("Keep Waiting", keepWaitingForResult);
+            m_actionModal.addButton("Quit Anyway", [this]() {
+                m_controlAwaitingAck = false;
+                m_hasQueuedControl = false;
+                m_pendingControl = ControlNetMsg{};
+                leaveOnlineGame(true);
+            });
+            m_actionModal.show();
+            focusChain().focusWidget(&m_actionModal);
+        }
+        if (m_controlRetryCount > 25 && !drainingTerminalControl) {
+            m_controlAwaitingAck = false;
+            if (m_uiState != UIState::GameOver) onConnectionLost();
+        } else {
+            m_lastControlSendTime = now;
+            transport.send(
+                reinterpret_cast<const uint8_t*>(&m_pendingControl),
+                sizeof(m_pendingControl));
+        }
+    }
+
+    if ((now - m_lastHeartbeatSendTime) > 500) {
+        m_lastHeartbeatSendTime = now;
         sendHeartbeat();
     }
 
-    // Check for connection timeout (3 seconds without any packet)
-    if (!m_disconnectShown && transport.msSinceLastReceive() > 3000 &&
-        m_uiState != UIState::GameOver && now >= m_disconnectGraceUntil) {
+    // Heartbeats prove liveness but must not extend this causal deadline. A
+    // peer one position ahead means the exact next Move is missing.
+    if (m_missingRemoteMove &&
+        (now - m_missingRemoteMoveSince) > 5200 &&
+        m_uiState != UIState::GameOver) {
+        m_missingRemoteMove = false;
+        onConnectionLost("Move not received");
+    }
+
+    const bool graceExpired = m_disconnectGraceUntil == 0 ||
+        static_cast<int32_t>(now - m_disconnectGraceUntil) >= 0;
+    if (!m_disconnectShown &&
+        (now - m_lastValidPeerPacketTime) > 4000 &&
+        m_uiState != UIState::GameOver && graceExpired) {
         onConnectionLost();
     }
 }
 
 void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
-    // Send ack immediately (even for wrong session — sender needs it)
-    MoveAckMsg ack;
-    ack.seq = msg.seq;
-    ack.sessionId = m_sessionId;
-    EspNowTransport::instance().send(
-        reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
-
-    // Ignore moves from a different session
-    if (msg.sessionId != m_sessionId) return;
-
-    // Once a result has been established, late or queued network moves must
-    // not replace it or mutate a historical board being reviewed.
-    if (m_uiState == UIState::GameOver ||
-        (m_uiState == UIState::Reviewing &&
-         m_preReviewState == UIState::GameOver)) {
+    if (m_lastAppliedRemoteSequence != 0 &&
+        msg.sequence == m_lastAppliedRemoteSequence &&
+        msg.preBoardHash == m_lastRemotePreHash &&
+        msg.postBoardHash == m_lastRemotePostHash) {
+        // ACK the position produced by the duplicated move, even if this side
+        // has already played its reply and the current board has advanced.
+        sendMoveAck(msg, NetAckStatus::Duplicate, msg.postBoardHash);
         return;
     }
 
-    // Deduplicate: if we've already applied this move, skip
-    if (msg.seq < m_historyCount) return;
+    if (m_uiState == UIState::GameOver ||
+        (m_uiState == UIState::Reviewing &&
+         m_preReviewState == UIState::GameOver) ||
+        msg.sequence != m_expectedRemoteSequence) {
+        sendMoveAck(msg, NetAckStatus::Rejected,
+                    ChessZobrist::hash(m_board));
+        return;
+    }
 
-    // Exit review mode before applying remote move
     if (m_uiState == UIState::Reviewing) {
         exitReviewMode();
     }
 
-    // Convert to Move and validate
-    Move move = netMsgToMove(msg);
+    const uint32_t currentHash = ChessZobrist::hash(m_board);
+    if (msg.preBoardHash != currentHash ||
+        m_board.sideToMove() != opponent(m_localColor) ||
+        msg.fromCol > 7 || msg.fromRow > 7 || msg.toCol > 7 ||
+        msg.toRow > 7 || (msg.flags & ~0x03u) != 0 ||
+        !isValidMoveClockValue(m_clock.enabled(), msg.moverRemainingMs)) {
+        sendMoveAck(msg, NetAckStatus::Rejected, currentHash);
+        onConnectionLost("Game out of sync");
+        return;
+    }
 
+    const Move move = netMsgToMove(msg);
     MoveList legal;
     ChessRules::generateLegal(m_board, legal);
     if (!legal.contains(move)) {
-        return; // Invalid move — ignore (shouldn't happen)
+        sendMoveAck(msg, NetAckStatus::Rejected, currentHash);
+        onConnectionLost("Invalid remote move");
+        return;
     }
 
-    // Apply the remote move
+    const MoveRecord probe = m_board.makeMove(move);
+    const uint32_t probedPostHash = ChessZobrist::hash(m_board);
+    m_board.unmakeMove(probe);
+    if (probedPostHash != msg.postBoardHash) {
+        sendMoveAck(msg, NetAckStatus::Rejected, currentHash);
+        onConnectionLost("Game out of sync");
+        return;
+    }
+
+    // A valid reply proves that the peer applied our preceding move even if
+    // its explicit ACK was the packet that got lost.
+    m_awaitingAck = false;
+    // Preserve draw-offer correlation until a delayed decline arrives. An
+    // accept remains valid only while the board still has the offer hash.
+    if (m_clock.enabled()) {
+        m_remoteClockPending = true;
+        m_remoteMoverRemainingMs = msg.moverRemainingMs;
+    }
     m_applyingRemoteMove = true;
     executeMove(move);
     m_applyingRemoteMove = false;
+
+    const uint32_t appliedHash = ChessZobrist::hash(m_board);
+    if (appliedHash != msg.postBoardHash) {
+        m_remoteClockPending = false;
+        sendMoveAck(msg, NetAckStatus::Rejected, appliedHash);
+        onConnectionLost("Game out of sync");
+        return;
+    }
+
+    m_lastAppliedRemoteSequence = msg.sequence;
+    m_lastRemotePreHash = msg.preBoardHash;
+    m_lastRemotePostHash = msg.postBoardHash;
+    advanceNonZero(m_expectedRemoteSequence);
+    m_missingRemoteMove = false;
+    sendMoveAck(msg, NetAckStatus::Accepted, appliedHash);
 }
 
-void ChessScene::onConnectionLost() {
+bool ChessScene::sendControl(NetControlType control, uint8_t arg0,
+                             uint8_t arg1, uint16_t relatedEventId,
+                             uint32_t valueMs, bool replacePending) {
+    ControlNetMsg message = buildControl(control, arg0, arg1,
+                                         relatedEventId, valueMs);
+    if (m_controlAwaitingAck) {
+        if (!replacePending) return false;
+        if (m_hasQueuedControl &&
+            m_queuedControl.control == NetControlType::GameEnd) {
+            // A terminal event is the final word for this stream and must not
+            // be overwritten by a later nonterminal action.
+            return control == NetControlType::GameEnd;
+        }
+        m_hasQueuedControl = true;
+        m_queuedControl = message;
+        return true;
+    }
+
+    message.eventId = m_nextControlEventId;
+    advanceNonZero(m_nextControlEventId);
+
+    m_pendingControl = message;
+    m_controlAwaitingAck = true;
+    m_controlRetryCount = 0;
+    m_lastControlSendTime = millis();
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&m_pendingControl),
+        sizeof(m_pendingControl));
+    return true;
+}
+
+void ChessScene::sendQueuedControl(bool reusePendingEventId) {
+    if (!m_hasQueuedControl || m_controlAwaitingAck) return;
+    const TerminalReliability::ImmutableQueuedControl queued(m_queuedControl);
+    const uint16_t rejectedEventId = m_pendingControl.eventId;
+    m_hasQueuedControl = false;
+    m_queuedControl = ControlNetMsg{};
+    ControlNetMsg message = reusePendingEventId
+        ? queued.promoteReusingEventId(rejectedEventId)
+        : queued.promote();
+    if (!reusePendingEventId) {
+        message.eventId = m_nextControlEventId;
+        advanceNonZero(m_nextControlEventId);
+    }
+    m_pendingControl = message;
+    m_controlAwaitingAck = true;
+    m_controlRetryCount = 0;
+    m_lastControlSendTime = millis();
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&m_pendingControl),
+        sizeof(m_pendingControl));
+}
+
+ControlNetMsg ChessScene::buildControl(NetControlType control, uint8_t arg0,
+                                       uint8_t arg1,
+                                       uint16_t relatedEventId,
+                                       uint32_t valueMs) const {
+    ControlNetMsg message;
+    message.header.gameId = m_networkGameId;
+    message.header.sessionId = m_sessionId;
+    message.control = control;
+    message.arg0 = arg0;
+    message.arg1 = arg1;
+    message.relatedEventId = relatedEventId;
+    message.valueMs = valueMs;
+    const ChessClockSnapshot clock = m_clock.snapshot(millis());
+    message.whiteRemainingMs = clock.whiteRemainingMs;
+    message.blackRemainingMs = clock.blackRemainingMs;
+    message.boardHash = ChessZobrist::hash(m_board);
+    return message;
+}
+
+void ChessScene::sendControlAck(const ControlNetMsg& msg,
+                                NetAckStatus status) {
+    ControlAckMsg ack;
+    ack.header.gameId = m_networkGameId;
+    ack.header.sessionId = m_sessionId;
+    ack.eventId = msg.eventId;
+    ack.control = msg.control;
+    ack.status = status;
+    if (msg.control == NetControlType::TimeGift &&
+        status != NetAckStatus::Rejected && m_clock.enabled()) {
+        ack.clockRemainingMs =
+            m_clock.remainingMsAt(m_localColor, millis());
+    }
+    ack.boardHash = ChessZobrist::hash(m_board);
+    EspNowTransport::instance().send(
+        reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+}
+
+void ChessScene::onControlReceived(const ControlNetMsg& msg) {
+    if (msg.eventId == m_lastRemoteControlEventId) {
+        const bool same =
+            std::memcmp(&msg, &m_lastRemoteControl, sizeof(msg)) == 0;
+        sendControlAck(msg, same &&
+            m_lastRemoteControlStatus == NetAckStatus::Accepted
+                ? NetAckStatus::Duplicate : NetAckStatus::Rejected);
+        return;
+    }
+    if (msg.eventId != m_expectedRemoteControlEventId ||
+        static_cast<uint8_t>(msg.control) <
+            static_cast<uint8_t>(NetControlType::DrawOffer) ||
+        static_cast<uint8_t>(msg.control) >
+            static_cast<uint8_t>(NetControlType::GameEnd)) {
+        sendControlAck(msg, NetAckStatus::Rejected);
+        return;
+    }
+
+    const uint32_t boardHash = ChessZobrist::hash(m_board);
+    bool valid = true;
+    bool consumeRejectedDraw = false;
+    GameOutcome remoteOutcome = GameOutcome::None;
+    TerminationReason remoteTermination = TerminationReason::None;
+    if (msg.control == NetControlType::DrawOffer) {
+        const bool validPayload = msg.arg0 == 0 && msg.arg1 == 0 &&
+            msg.relatedEventId == 0 && msg.valueMs == 0;
+        valid = validPayload && m_resultOutcome == GameOutcome::None &&
+                !m_controlAwaitingAck && !m_hasQueuedControl &&
+                msg.boardHash == boardHash &&
+                m_board.sideToMove() == m_localColor;
+        consumeRejectedDraw = validPayload && !valid;
+    } else if (msg.control == NetControlType::DrawAccept ||
+        msg.control == NetControlType::DrawDecline) {
+        valid = valid && m_localDrawOfferEventId != 0 &&
+                msg.relatedEventId == m_localDrawOfferEventId &&
+                msg.arg0 == 0 && msg.arg1 == 0 && msg.valueMs == 0 &&
+                msg.boardHash == m_localDrawOfferBoardHash;
+        if (msg.control == NetControlType::DrawAccept) {
+            valid = valid && boardHash == m_localDrawOfferBoardHash;
+            consumeRejectedDraw = !valid &&
+                m_localDrawOfferEventId != 0 &&
+                msg.relatedEventId == m_localDrawOfferEventId &&
+                msg.boardHash == m_localDrawOfferBoardHash;
+        }
+    } else if (msg.control == NetControlType::TimeGift) {
+        valid = valid && m_resultOutcome == GameOutcome::None &&
+                m_clock.enabled() && msg.valueMs == 15000 &&
+                msg.arg0 == static_cast<uint8_t>(m_localColor) &&
+                msg.arg1 == 0 && msg.relatedEventId == 0 &&
+                msg.boardHash == boardHash &&
+                m_board.sideToMove() == opponent(m_localColor);
+    } else if (msg.control == NetControlType::GameEnd) {
+        valid = msg.valueMs == 0 &&
+                fromNetResult(msg.arg0, remoteOutcome) &&
+                fromNetTermination(msg.arg1, remoteTermination);
+        if (valid) {
+            const PieceColor sender = opponent(m_localColor);
+            const GameOutcome receiverWin = m_localColor == PieceColor::White
+                ? GameOutcome::WhiteWin : GameOutcome::BlackWin;
+            switch (remoteTermination) {
+                case TerminationReason::Checkmate: {
+                    const GameOutcome boardOutcome =
+                        m_board.sideToMove() == PieceColor::White
+                            ? GameOutcome::BlackWin
+                            : GameOutcome::WhiteWin;
+                    valid = msg.relatedEventId == 0 &&
+                            msg.boardHash == boardHash &&
+                            ChessRules::isCheckmate(m_board) &&
+                            remoteOutcome == boardOutcome;
+                    break;
+                }
+                case TerminationReason::Stalemate:
+                    valid = msg.relatedEventId == 0 &&
+                            msg.boardHash == boardHash &&
+                            remoteOutcome == GameOutcome::Draw &&
+                            ChessRules::isStalemate(m_board);
+                    break;
+                case TerminationReason::Repetition:
+                    valid = msg.relatedEventId == 0 &&
+                            !m_historyOverflow &&
+                            msg.boardHash == boardHash &&
+                            remoteOutcome == GameOutcome::Draw &&
+                            ChessRules::isThreefoldRepetition(
+                                m_board, m_history, m_historyCount);
+                    break;
+                case TerminationReason::FiftyMove:
+                    valid = msg.relatedEventId == 0 &&
+                            msg.boardHash == boardHash &&
+                            remoteOutcome == GameOutcome::Draw &&
+                            ChessRules::isDraw50Move(m_board);
+                    break;
+                case TerminationReason::InsufficientMaterial:
+                    valid = msg.relatedEventId == 0 &&
+                            msg.boardHash == boardHash &&
+                            remoteOutcome == GameOutcome::Draw &&
+                            ChessRules::isInsufficientMaterial(m_board);
+                    break;
+                case TerminationReason::Resignation:
+                    valid = msg.relatedEventId == 0 &&
+                            remoteOutcome == receiverWin;
+                    break;
+                case TerminationReason::Timeout: {
+                    const uint32_t senderRemaining =
+                        sender == PieceColor::White
+                            ? msg.whiteRemainingMs
+                            : msg.blackRemainingMs;
+                    valid = msg.relatedEventId == 0 &&
+                            msg.boardHash == boardHash &&
+                            remoteOutcome == receiverWin &&
+                            m_board.sideToMove() == sender &&
+                            senderRemaining == 0;
+                    break;
+                }
+                case TerminationReason::Agreement:
+                    // The offerer sends this reliable receipt after accepting
+                    // DrawAccept. It lets the accepting side finish even when
+                    // the first ControlAck was lost.
+                    valid = remoteOutcome == GameOutcome::Draw &&
+                            msg.boardHash == boardHash &&
+                            msg.relatedEventId != 0 &&
+                            msg.relatedEventId ==
+                                m_lastLocalDrawAcceptEventId &&
+                            ((m_finishDrawOnAck &&
+                              m_pendingControl.control ==
+                                  NetControlType::DrawAccept &&
+                              m_pendingControl.eventId ==
+                                  msg.relatedEventId) ||
+                             (m_resultOutcome == GameOutcome::Draw &&
+                              m_termination ==
+                                  TerminationReason::Agreement));
+                    break;
+                default:
+                    // Disconnect is a local transport state and is never
+                    // trusted as a remote game result.
+                    valid = false;
+                    break;
+            }
+        }
+    }
+
+    if (!valid) {
+        if (consumeRejectedDraw) {
+            m_lastRemoteControlEventId = msg.eventId;
+            m_lastRemoteControl = msg;
+            m_lastRemoteControlStatus = NetAckStatus::Rejected;
+            advanceNonZero(m_expectedRemoteControlEventId);
+        }
+        sendControlAck(msg, NetAckStatus::Rejected);
+        return;
+    }
+
+    if (msg.control == NetControlType::TimeGift) {
+        // Commit before acknowledging. A lost ACK is harmless because the
+        // duplicate path below reports the already-committed clock without
+        // applying the gift twice.
+        const uint32_t giftNow = millis();
+        const uint32_t current =
+            m_clock.remainingMsAt(m_localColor, giftNow);
+        m_clock.setRemainingMs(
+            m_localColor, saturatingAddMs(current, msg.valueMs), giftNow);
+    }
+
+    m_lastRemoteControlEventId = msg.eventId;
+    m_lastRemoteControl = msg;
+    m_lastRemoteControlStatus = NetAckStatus::Accepted;
+    advanceNonZero(m_expectedRemoteControlEventId);
+    sendControlAck(msg, NetAckStatus::Accepted);
+
+    switch (msg.control) {
+        case NetControlType::DrawOffer:
+            if (m_uiState == UIState::GameOver) break;
+            m_remoteDrawOfferEventId = msg.eventId;
+            m_actionModal.clearButtons();
+            m_actionModal.setTitle("Draw Offer");
+            m_actionModal.setMessage("Opponent offers a draw.");
+            m_actionModal.setEscapeCallback([this, msg]() {
+                m_actionModal.hide();
+                m_remoteDrawOfferEventId = 0;
+                sendControl(NetControlType::DrawDecline, 0, 0,
+                            msg.eventId, 0, true);
+                restoreGameInputFocus();
+            });
+            m_actionModal.addButton("Accept", [this, msg]() {
+                m_actionModal.hide();
+                m_remoteDrawOfferEventId = 0;
+                const uint32_t now = millis();
+                m_clockPausedForDrawAccept = m_clock.pause(now);
+                if (m_clock.enabled() && !m_clockPausedForDrawAccept) {
+                    m_clock.update(now);
+                    if (m_clock.hasFlaggedSide() &&
+                        m_clock.flaggedSide() == m_localColor) {
+                        const GameOutcome outcome =
+                            m_localColor == PieceColor::White
+                                ? GameOutcome::BlackWin
+                                : GameOutcome::WhiteWin;
+                        finishGame(outcome, TerminationReason::Timeout,
+                                   "Time's Up!",
+                                   outcome == GameOutcome::WhiteWin
+                                       ? "White wins!" : "Black wins!",
+                                   true);
+                        return;
+                    }
+                }
+                if (!sendControl(NetControlType::DrawAccept, 0, 0,
+                                 msg.eventId, 0, true)) {
+                    if (m_clockPausedForDrawAccept) {
+                        m_clock.resume(millis());
+                        m_clockPausedForDrawAccept = false;
+                    }
+                    closeActionModal();
+                    return;
+                }
+                m_lastLocalDrawAcceptEventId = m_pendingControl.eventId;
+                m_finishDrawOnAck = true;
+                m_actionModal.clearButtons();
+                m_actionModal.setTitle("Draw Agreement");
+                m_actionModal.setMessage("Confirming with opponent...");
+                m_actionModal.setEscapeCallback([]() {});
+                m_actionModal.show();
+                focusChain().focusWidget(&m_actionModal);
+            });
+            m_actionModal.addButton("Decline", [this, msg]() {
+                m_actionModal.hide();
+                m_remoteDrawOfferEventId = 0;
+                sendControl(NetControlType::DrawDecline, 0, 0,
+                            msg.eventId, 0, true);
+                restoreGameInputFocus();
+            });
+            m_actionModal.show();
+            focusChain().focusWidget(&m_actionModal);
+            break;
+
+        case NetControlType::DrawAccept:
+            // The response proves the peer received our DrawOffer even if its
+            // ACK was lost, so the offer no longer needs its own retry slot.
+            if (m_controlAwaitingAck &&
+                m_pendingControl.control == NetControlType::DrawOffer) {
+                m_controlAwaitingAck = false;
+                m_pendingControl = ControlNetMsg{};
+            }
+            m_localDrawOfferEventId = 0;
+            m_localDrawOfferBoardHash = 0;
+            {
+                const uint32_t terminalNow = millis();
+                if (m_clock.enabled()) {
+                    const PieceColor sender = opponent(m_localColor);
+                    const uint32_t senderRemaining =
+                        sender == PieceColor::White
+                            ? msg.whiteRemainingMs : msg.blackRemainingMs;
+                    m_clock.setRemainingMs(sender, senderRemaining,
+                                           terminalNow);
+                }
+                finishGame(GameOutcome::Draw,
+                           TerminationReason::Agreement,
+                           "Draw Agreed", "Game is a draw.", false,
+                           terminalNow);
+                // Reliable final receipt: if the direct ACK above is lost,
+                // this independently confirms that DrawAccept was processed.
+                sendGameEnd(GameOutcome::Draw,
+                            TerminationReason::Agreement, msg.eventId);
+            }
+            break;
+
+        case NetControlType::DrawDecline:
+            if (m_controlAwaitingAck &&
+                m_pendingControl.control == NetControlType::DrawOffer) {
+                m_controlAwaitingAck = false;
+                m_pendingControl = ControlNetMsg{};
+            }
+            m_localDrawOfferEventId = 0;
+            m_localDrawOfferBoardHash = 0;
+            if (m_uiState != UIState::GameOver) {
+                m_statusBar.setRight("Draw declined");
+            }
+            break;
+
+        case NetControlType::TimeGift: {
+            updateStatusBar();
+            m_statusBar.setRight("+15 seconds");
+            break;
+        }
+
+        case NetControlType::GameEnd: {
+            const uint32_t terminalNow = millis();
+            const bool alreadyFinished =
+                m_resultOutcome != GameOutcome::None;
+            if (remoteTermination == TerminationReason::Agreement &&
+                m_finishDrawOnAck &&
+                m_pendingControl.control == NetControlType::DrawAccept &&
+                m_pendingControl.eventId == msg.relatedEventId) {
+                m_controlAwaitingAck = false;
+                m_pendingControl = ControlNetMsg{};
+                m_finishDrawOnAck = false;
+                m_clockPausedForDrawAccept = false;
+            }
+            if (!alreadyFinished && m_clock.enabled()) {
+                const PieceColor sender = opponent(m_localColor);
+                const uint32_t senderRemaining =
+                    sender == PieceColor::White
+                        ? msg.whiteRemainingMs : msg.blackRemainingMs;
+                m_clock.setRemainingMs(sender, senderRemaining, terminalNow);
+            }
+            const char* message = remoteOutcome == GameOutcome::Draw
+                ? "Game is a draw."
+                : (remoteOutcome == GameOutcome::WhiteWin
+                       ? "White wins!" : "Black wins!");
+            if (!alreadyFinished) {
+                finishGame(remoteOutcome, remoteTermination,
+                           terminalTitle(remoteTermination), message, false,
+                           terminalNow);
+            }
+            break;
+        }
+    }
+}
+
+void ChessScene::offerDraw() {
+    if (m_board.sideToMove() == m_localColor || m_awaitingAck) {
+        m_statusBar.setRight("Offer after move");
+        return;
+    }
+    if (m_localDrawOfferEventId != 0 || m_controlAwaitingAck ||
+        m_actionModal.isVisible()) {
+        m_statusBar.setRight("Offer pending");
+        return;
+    }
+    m_actionModal.clearButtons();
+    m_actionModal.setTitle("Offer Draw?");
+    m_actionModal.setMessage("Send a draw offer to your opponent?");
+    m_actionModal.setEscapeCallback([this]() { closeActionModal(); });
+    m_actionModal.addButton("Offer", [this]() {
+        m_actionModal.hide();
+        if (sendControl(NetControlType::DrawOffer)) {
+            m_localDrawOfferEventId = m_pendingControl.eventId;
+            m_localDrawOfferBoardHash = m_pendingControl.boardHash;
+            m_statusBar.setRight("Draw offered");
+        }
+        focusChain().focusWidget(&m_boardGrid);
+    });
+    m_actionModal.addButton("Cancel", [this]() { closeActionModal(); });
+    m_actionModal.show();
+    focusChain().focusWidget(&m_actionModal);
+}
+
+void ChessScene::giveOpponentTime() {
+    if (m_board.sideToMove() != m_localColor || m_awaitingAck) {
+        m_statusBar.setRight("Give time on your turn");
+        return;
+    }
+    if (m_localDrawOfferEventId != 0) {
+        m_statusBar.setRight("Resolve draw first");
+        return;
+    }
+    if (m_controlAwaitingAck || m_actionModal.isVisible()) {
+        m_statusBar.setRight("Action pending");
+        return;
+    }
+    m_actionModal.clearButtons();
+    m_actionModal.setTitle("Give +15 Seconds?");
+    m_actionModal.setMessage("This cannot be undone.");
+    m_actionModal.setEscapeCallback([this]() { closeActionModal(); });
+    m_actionModal.addButton("Give", [this]() {
+        m_actionModal.hide();
+        const PieceColor recipient = opponent(m_localColor);
+        if (sendControl(NetControlType::TimeGift,
+                        static_cast<uint8_t>(recipient), 0, 0, 15000)) {
+            m_timeGiftRecipient = recipient;
+            m_timeGiftPending = true;
+            m_statusBar.setRight("Confirming +15 sec");
+        } else {
+            m_statusBar.setRight("Could not send gift");
+        }
+        focusChain().focusWidget(&m_boardGrid);
+    });
+    m_actionModal.addButton("Cancel", [this]() { closeActionModal(); });
+    m_actionModal.show();
+    focusChain().focusWidget(&m_actionModal);
+}
+
+void ChessScene::confirmResign() {
+    if (m_board.sideToMove() != m_localColor || m_awaitingAck ||
+        m_controlAwaitingAck) {
+        m_statusBar.setRight("Resign on your turn");
+        return;
+    }
+    if (m_actionModal.isVisible()) return;
+    m_actionModal.clearButtons();
+    m_actionModal.setTitle("Resign?");
+    m_actionModal.setMessage("Give up this game?");
+    m_actionModal.setEscapeCallback([this]() { closeActionModal(); });
+    m_actionModal.addButton("Resign", [this]() {
+        m_actionModal.hide();
+        const GameOutcome outcome = m_localColor == PieceColor::White
+            ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+        finishGame(outcome, TerminationReason::Resignation, "Resigned",
+                   outcome == GameOutcome::WhiteWin
+                       ? "White wins!" : "Black wins!", true);
+    });
+    m_actionModal.addButton("Cancel", [this]() { closeActionModal(); });
+    m_actionModal.show();
+    focusChain().focusWidget(&m_actionModal);
+}
+
+void ChessScene::sendGameEnd(GameOutcome outcome,
+                             TerminationReason termination,
+                             uint16_t relatedEventId) {
+    sendControl(NetControlType::GameEnd,
+                static_cast<uint8_t>(toNetResult(outcome)),
+                static_cast<uint8_t>(toNetTermination(termination)),
+                relatedEventId, 0, true);
+}
+
+bool ChessScene::localMoveBlockedByControl() const {
+    return m_netMode == NetworkMode::Online && m_timeGiftPending;
+}
+
+void ChessScene::finishDeferredTimeoutIfReady() {
+    if (!m_deferredLocalTimeout || m_timeGiftPending ||
+        m_resultOutcome != GameOutcome::None) {
+        return;
+    }
+
+    const PieceColor flagged = m_deferredFlaggedSide;
+    m_deferredLocalTimeout = false;
+    const GameOutcome outcome = flagged == PieceColor::White
+        ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+    finishGame(outcome, TerminationReason::Timeout,
+               "Time's Up!",
+               flagged == PieceColor::White
+                   ? "Black wins!" : "White wins!",
+               true);
+}
+
+void ChessScene::onConnectionLost(const char* message) {
     const bool reviewingFinishedGame =
         m_uiState == UIState::Reviewing && m_preReviewState == UIState::GameOver;
     if (m_disconnectShown || m_uiState == UIState::GameOver ||
@@ -1964,26 +3685,93 @@ void ChessScene::onConnectionLost() {
     }
     m_disconnectShown = true;
 
-    m_gameOverModal.clearButtons();
-    m_gameOverModal.setTitle("Disconnected");
-    m_gameOverModal.setMessage("Lost connection");
+    // A disconnect overlay replaces the draw-offer modal. Reliably decline
+    // that interrupted offer so the peer cannot remain permanently stuck in
+    // an acknowledged-but-unanswered offer state after recovery.
+    if (m_remoteDrawOfferEventId != 0) {
+        const uint16_t offerEventId = m_remoteDrawOfferEventId;
+        m_remoteDrawOfferEventId = 0;
+        sendControl(NetControlType::DrawDecline, 0, 0,
+                    offerEventId, 0, true);
+    }
 
-    m_gameOverModal.addButton("Wait", [this]() {
-        m_gameOverModal.hide();
+    m_actionModal.clearButtons();
+    m_actionModal.setTitle("Disconnected");
+    m_actionModal.setMessage(message ? message : "Lost connection");
+
+    auto waitForConnection = [this]() {
+        m_actionModal.hide();
         m_disconnectShown = false;
         m_disconnectGraceUntil = millis() + 5000; // 5s grace before re-checking
-        // Resume retransmission of pending move if one was lost
-        if (m_lastSentSeq >= m_historyCount - 1 && m_historyCount > 0) {
+        if (m_lastSentSeq != 0 &&
+            m_board.sideToMove() == opponent(m_localColor) &&
+            ChessZobrist::hash(m_board) == m_lastSentPostHash) {
             m_awaitingAck = true;
-            m_retryCount = 0;
-            m_lastSendTime = millis();
+            m_moveRetryCount = 0;
+            m_lastMoveSendTime = millis();
         }
-        focusChain().focusWidget(&m_boardGrid);
-    });
-    m_gameOverModal.addButton("Quit", [this]() {
+        if (m_pendingControl.eventId != 0) {
+            m_controlAwaitingAck = true;
+            m_controlRetryCount = 0;
+            m_lastControlSendTime = millis();
+        }
+        if (m_finishDrawOnAck) {
+            m_actionModal.clearButtons();
+            m_actionModal.setTitle("Draw Agreement");
+            m_actionModal.setMessage("Confirming with opponent...");
+            m_actionModal.setEscapeCallback([]() {});
+            m_actionModal.show();
+            focusChain().focusWidget(&m_actionModal);
+        } else {
+            restoreGameInputFocus();
+        }
+    };
+    m_actionModal.setEscapeCallback(waitForConnection);
+    m_actionModal.addButton("Wait", waitForConnection);
+    m_actionModal.addButton("Quit", [this]() {
         leaveOnlineGame();
     });
 
-    m_gameOverModal.show();
-    focusChain().focusWidget(&m_gameOverModal);
+    m_actionModal.show();
+    focusChain().focusWidget(&m_actionModal);
+}
+
+void ChessScene::restoreGameInputFocus() {
+    if (m_uiState == UIState::PromotionPending) {
+        if (!m_promotionModal.isVisible()) m_promotionModal.show();
+        focusChain().focusWidget(&m_promotionModal);
+    } else {
+        focusChain().focusWidget(&m_boardGrid);
+    }
+}
+
+void ChessScene::noteValidPeerPacket(uint32_t now) {
+    m_lastValidPeerPacketTime = now;
+    if (!m_disconnectShown) return;
+
+    // A normal control gives up its fast retry loop when the disconnect
+    // prompt is raised but deliberately retains the packet. Recovery must
+    // re-arm it before dismissing the prompt; this is especially important
+    // for an auto-declined draw offer whose source modal no longer exists.
+    if (!m_controlAwaitingAck && m_pendingControl.eventId != 0) {
+        m_controlAwaitingAck = true;
+        m_controlRetryCount = 0;
+        m_lastControlSendTime = now;
+    }
+
+    m_disconnectShown = false;
+    m_actionModal.hide();
+    if (m_finishDrawOnAck) {
+        // The clock remains deliberately paused while the terminal draw
+        // acknowledgement is retried. Do not expose an apparently playable
+        // board merely because another valid packet restored liveness.
+        m_actionModal.clearButtons();
+        m_actionModal.setTitle("Draw Agreement");
+        m_actionModal.setMessage("Confirming with opponent...");
+        m_actionModal.setEscapeCallback([]() {});
+        m_actionModal.show();
+        focusChain().focusWidget(&m_actionModal);
+    } else {
+        restoreGameInputFocus();
+    }
 }

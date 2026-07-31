@@ -1,42 +1,65 @@
 #ifndef CHESS_STORAGE_H
 #define CHESS_STORAGE_H
 
-#include "chess_board.h"
 #include "chess_ai.h"
+#include "game_records.h"
 
-// =====================================================================
-// ChessStorage: persist/restore chess game state to ESP32 NVS.
-// Saves board, move history, and mode configuration so the game
-// survives power cycles.
-// =====================================================================
+#include <cstdint>
 
 namespace ChessStorage {
 
-    // Save the current game state to NVS.
-    void saveGame(const ChessBoard& board,
-                  const MoveRecord* history, uint8_t historyCount,
-                  bool historyOverflow,
-                  AIDifficulty aiDifficulty, PieceColor aiColor,
-                  PieceColor localColor, bool boardFlipped,
-                  ChessVariant variant, uint16_t positionIndex,
-                  TimeControl timeControl, uint32_t timeWhiteMs,
-                  uint32_t timeBlackMs, bool timerRunning);
+enum class LoadStatus : uint8_t {
+    Loaded,
+    Missing,
+    Corrupt,
+    UnsupportedVersion,
+    IoError,
+};
 
-    // Load a previously saved game. Returns true if a valid save was found.
-    bool loadGame(ChessBoard& board,
-                  MoveRecord* history, uint8_t& historyCount,
-                  bool& historyOverflow,
-                  AIDifficulty& aiDifficulty, PieceColor& aiColor,
-                  PieceColor& localColor, bool& boardFlipped,
-                  ChessVariant& variant, uint16_t& positionIndex,
-                  TimeControl& timeControl, uint32_t& timeWhiteMs,
-                  uint32_t& timeBlackMs, bool& timerRunning);
+struct LoadResult {
+    LoadStatus status = LoadStatus::Missing;
+    uint8_t sourceVersion = 0;
+    bool participantsEmbedded = false;
+    uint32_t gameId = 0;
+};
 
-    // Check if a saved game exists.
-    bool hasSave();
+// Writes a CRC32-protected v6 record. Participants (including the gameId) are
+// committed in the same NVS blob as the board. Both profile IDs may be zero,
+// but gameId and sanitized display names are required.
+bool saveGame(const ChessBoard& board,
+              const MoveRecord* history, uint8_t historyCount,
+              bool historyOverflow,
+              AIDifficulty aiDifficulty, PieceColor aiColor,
+              PieceColor localColor, bool boardFlipped,
+              ChessVariant variant, uint16_t positionIndex,
+              TimeControl timeControl, uint32_t timeWhiteMs,
+              uint32_t timeBlackMs, bool timerRunning,
+              const ActiveGameParticipants& participants);
 
-    // Clear the saved game.
-    void clearSave();
+// Safely decodes v1-v6. All output arguments remain untouched on failure.
+// participants.valid is false for v1-v5 because their separate active_meta
+// record cannot be proven to belong to the board save.
+LoadResult loadGame(ChessBoard& board,
+                    MoveRecord* history, uint8_t& historyCount,
+                    bool& historyOverflow,
+                    AIDifficulty& aiDifficulty, PieceColor& aiColor,
+                    PieceColor& localColor, bool& boardFlipped,
+                    ChessVariant& variant, uint16_t& positionIndex,
+                    TimeControl& timeControl, uint32_t& timeWhiteMs,
+                    uint32_t& timeBlackMs, bool& timerRunning,
+                    ActiveGameParticipants& participants);
+
+// Fully validates the record and reports its version/embedded gameId without
+// exposing partially decoded state.
+LoadResult probe();
+
+// Compatibility convenience. True only for a fully valid supported save.
+bool hasSave();
+
+// Idempotent erase. clearIfGameId refuses to delete a legacy, corrupt, future,
+// or different v6 game.
+bool clearSave();
+bool clearIfGameId(uint32_t expectedGameId);
 
 } // namespace ChessStorage
 
