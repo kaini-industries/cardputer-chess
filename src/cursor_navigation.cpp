@@ -67,6 +67,12 @@ bool rowColumnLess(Square candidate, Square incumbent) {
             candidate.col < incumbent.col);
 }
 
+bool rowColumnGreater(Square candidate, Square incumbent) {
+    return candidate.row > incumbent.row ||
+           (candidate.row == incumbent.row &&
+            candidate.col > incumbent.col);
+}
+
 bool betterForwardCandidate(Square candidate, Square incumbent,
                             Square current, CursorDirection direction) {
     const uint8_t candidatePerpendicular =
@@ -178,5 +184,44 @@ bool chooseCursorDestination(const Square* cells, uint8_t count,
     if (!found) return false;
 
     next = best;
+    return true;
+}
+
+bool cycleCursorDestination(const Square* cells, uint8_t count,
+                            Square current, Square& next) {
+    if (cells == nullptr || count == 0 || !current.valid()) return false;
+
+    bool foundAny = false;
+    bool currentIsDestination = false;
+    bool foundAfterCurrent = false;
+    Square first;
+    Square afterCurrent;
+
+    for (uint8_t i = 0; i < count; ++i) {
+        const Square candidate = cells[i];
+        if (!candidate.valid()) continue;
+
+        if (!foundAny || rowColumnLess(candidate, first)) {
+            first = candidate;
+            foundAny = true;
+        }
+
+        if (candidate == current) {
+            currentIsDestination = true;
+        } else if (rowColumnGreater(candidate, current) &&
+                   (!foundAfterCurrent ||
+                    rowColumnLess(candidate, afterCurrent))) {
+            afterCurrent = candidate;
+            foundAfterCurrent = true;
+        }
+    }
+
+    if (!foundAny) return false;
+
+    if (!currentIsDestination || !foundAfterCurrent) {
+        next = first;
+    } else {
+        next = afterCurrent;
+    }
     return true;
 }

@@ -30,4 +30,16 @@ bool chooseCursorDestination(const Square* cells, uint8_t count,
                              Square current, CursorDirection direction,
                              Square& next);
 
+// Chooses the next unique legal destination in display order (top-to-bottom,
+// then left-to-right), wrapping after the final cell. The input order is not
+// significant and duplicate cells (such as four promotion variants) count as
+// one destination. If current is not itself a destination, the first display-
+// ordered destination is returned. A sole same-square destination is retained
+// for Chess960's zero-displacement castling case.
+//
+// Returns false without modifying next when the input has no usable
+// destination or current is invalid.
+bool cycleCursorDestination(const Square* cells, uint8_t count,
+                            Square current, Square& next);
+
 #endif // CURSOR_NAVIGATION_H

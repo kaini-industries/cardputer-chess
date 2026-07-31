@@ -82,6 +82,13 @@ public:
     void setCursorNavigation(CursorNavigation navigation) {
         m_cursorNavigation = navigation;
     }
+    /**
+     * Configure whether Space activates the current cell.
+     *
+     * Enabled by default for backwards compatibility. When disabled, Space
+     * is left unconsumed so the containing scene can assign it another action.
+     */
+    void setSpaceActivates(bool enabled) { m_spaceActivates = enabled; }
     void setContext(void* ctx) { m_context = ctx; }
 
     void setDrawBorder(bool draw) { m_drawBorder = draw; }
@@ -246,8 +253,15 @@ public:
             if (m_cursorCol < m_cols - 1) { m_cursorCol++; markDirty(); }
             return true;
         case Key::ENTER:
+            // Activation is edge-triggered. Consuming repeat events prevents
+            // a held key from falling through and activating something else.
+            if (event.isDown() && m_onAction) {
+                m_onAction(m_cursorCol, m_cursorRow);
+            }
+            return true;
         case Key::SPACE:
-            if (m_onAction) {
+            if (!m_spaceActivates) return false;
+            if (event.isDown() && m_onAction) {
                 m_onAction(m_cursorCol, m_cursorRow);
             }
             return true;
@@ -271,6 +285,7 @@ private:
 
     bool m_drawBorder = false;
     bool m_drawGridLines = false;
+    bool m_spaceActivates = true;
 
     CellState m_cellFlags[MAX_ROWS][MAX_COLS] = {};
 

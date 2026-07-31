@@ -265,6 +265,88 @@ void test_zero_displacement_destination_is_retained_only_when_necessary() {
     }
 }
 
+void test_cycle_rejects_invalid_input_without_changing_output() {
+    const Square valid[] = {Square{1, 1}, Square{2, 2}};
+    const Square invalid[] = {NO_SQUARE, Square{8, 0}, Square{0, 8}};
+    Square next{6, 6};
+
+    TEST_ASSERT_FALSE(cycleCursorDestination(
+        nullptr, 2, Square{0, 0}, next));
+    assertSquare(Square{6, 6}, next, "null cycle input changed output");
+
+    TEST_ASSERT_FALSE(cycleCursorDestination(
+        valid, 0, Square{0, 0}, next));
+    assertSquare(Square{6, 6}, next, "empty cycle input changed output");
+
+    TEST_ASSERT_FALSE(cycleCursorDestination(valid, 2, NO_SQUARE, next));
+    assertSquare(Square{6, 6}, next, "invalid cycle current changed output");
+
+    TEST_ASSERT_FALSE(cycleCursorDestination(
+        invalid, 3, Square{0, 0}, next));
+    assertSquare(Square{6, 6}, next,
+                 "invalid cycle destinations changed output");
+}
+
+void test_cycle_uses_display_order_independent_of_input_order() {
+    const Square destinations[] = {
+        Square{7, 7}, Square{3, 2}, Square{6, 0},
+        Square{1, 2}, Square{0, 5},
+    };
+    const Square expected[] = {
+        Square{6, 0}, Square{1, 2}, Square{3, 2},
+        Square{0, 5}, Square{7, 7}, Square{6, 0},
+    };
+    Square current{4, 4}; // The selected piece is not a destination.
+
+    for (Square expectedDestination : expected) {
+        Square next = NO_SQUARE;
+        TEST_ASSERT_TRUE(cycleCursorDestination(
+            destinations, 5, current, next));
+        assertSquare(expectedDestination, next,
+                     "cycle did not follow display order or wrap");
+        current = next;
+    }
+}
+
+void test_cycle_deduplicates_promotion_destinations() {
+    const Square destinations[] = {
+        Square{2, 0}, Square{3, 0}, Square{2, 0},
+        Square{2, 0}, Square{2, 0}, Square{7, 4},
+    };
+    const Square expected[] = {
+        Square{2, 0}, Square{3, 0}, Square{7, 4}, Square{2, 0},
+    };
+    Square current{2, 1};
+
+    for (Square expectedDestination : expected) {
+        Square next = NO_SQUARE;
+        TEST_ASSERT_TRUE(cycleCursorDestination(
+            destinations, 6, current, next));
+        assertSquare(expectedDestination, next,
+                     "promotion duplicate occupied an extra cycle step");
+        current = next;
+    }
+}
+
+void test_cycle_preserves_chess960_same_square_destination() {
+    const Square current{6, 0};
+    const Square onlyCurrent[] = {current, current};
+    Square next = NO_SQUARE;
+
+    TEST_ASSERT_TRUE(cycleCursorDestination(
+        onlyCurrent, 2, current, next));
+    assertSquare(current, next,
+                 "cycle discarded sole zero-displacement destination");
+
+    const Square withAlternative[] = {
+        current, current, Square{7, 0}, Square{1, 0},
+    };
+    TEST_ASSERT_TRUE(cycleCursorDestination(
+        withAlternative, 4, current, next));
+    assertSquare(Square{7, 0}, next,
+                 "cycle did not advance past same-square destination");
+}
+
 } // namespace
 
 int main(int, char**) {
@@ -279,5 +361,9 @@ int main(int, char**) {
     RUN_TEST(test_duplicate_promotion_destinations_are_effectively_deduplicated);
     RUN_TEST(test_one_destination_is_reached_from_every_direction);
     RUN_TEST(test_zero_displacement_destination_is_retained_only_when_necessary);
+    RUN_TEST(test_cycle_rejects_invalid_input_without_changing_output);
+    RUN_TEST(test_cycle_uses_display_order_independent_of_input_order);
+    RUN_TEST(test_cycle_deduplicates_promotion_destinations);
+    RUN_TEST(test_cycle_preserves_chess960_same_square_destination);
     return UNITY_END();
 }

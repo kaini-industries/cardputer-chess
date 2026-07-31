@@ -20,13 +20,34 @@ public:
         Disconnected   // Was paired, lost contact
     };
 
+    enum class Error : uint8_t {
+        None,
+        InvalidArgument,
+        WifiMode,
+        WifiChannel,
+        EspNowInit,
+        RegisterReceiveCallback,
+        RegisterSendCallback,
+        UnregisterReceiveCallback,
+        UnregisterSendCallback,
+        AddPeer,
+        RemovePeer,
+        AddBroadcastPeer,
+        RemoveBroadcastPeer,
+        SendQueue,
+        SendDelivery,
+        EspNowDeinit,
+    };
+
     // Lifecycle
+    // init() always tears down any previous transport state first so each
+    // pairing attempt begins without a stale ESP-NOW peer or queued packet.
     bool init();       // WiFi STA mode + esp_now_init
     void shutdown();   // esp_now_deinit + WiFi off
 
     // Peer management
-    void addPeer(const uint8_t mac[6]);
-    void removePeer();
+    bool addPeer(const uint8_t mac[6]);
+    bool removePeer();
 
     // Sending
     bool broadcast(const uint8_t* data, uint8_t len);
@@ -45,8 +66,24 @@ public:
     const uint8_t* peerMac() const { return m_peerMac; }
     bool isPeerMac(const uint8_t mac[6]) const;
 
+    // Diagnostics. Immediate send success only means ESP-NOW queued the
+    // packet; lastSendDelivered() reflects the asynchronous radio callback.
+    Error lastError() const { return m_lastError; }
+    int32_t lastEspError() const { return m_lastEspError; }
+    const char* lastErrorName() const;
+    bool callbacksRegistered() const {
+        return m_recvCallbackRegistered && m_sendCallbackRegistered;
+    }
+    bool lastSendDelivered() const { return m_lastSendDelivered; }
+    uint32_t sendQueueFailures() const { return m_sendQueueFailures; }
+    uint32_t sendDeliveryFailures() const { return m_sendDeliveryFailures; }
+    uint32_t receiveDrops() const { return m_rxDrops; }
+    uint32_t rejectedPackets() const { return m_rxRejected; }
+    void clearDiagnostics();
+
     // Called by ISR callback — do not call directly
     void _onReceive(const uint8_t* mac, const uint8_t* data, int len);
+    void _onSend(const uint8_t* mac, bool delivered);
 
 private:
     EspNowTransport() = default;
@@ -65,12 +102,29 @@ private:
     RxSlot   m_rxBuf[RX_SLOTS];
     uint8_t  m_rxHead = 0;  // Next slot to write (ISR)
     uint8_t  m_rxTail = 0;  // Next slot to read (main loop)
+    uint8_t  m_rxCount = 0;
 
     State    m_state = State::Idle;
     uint8_t  m_ownMac[6] = {};
     uint8_t  m_peerMac[6] = {};
     bool     m_hasPeer = false;
+    bool     m_hasBroadcastPeer = false;
+    bool     m_espNowInitialized = false;
+    bool     m_recvCallbackRegistered = false;
+    bool     m_sendCallbackRegistered = false;
     uint32_t m_lastRecvTime = 0;
+
+    volatile Error    m_lastError = Error::None;
+    volatile int32_t  m_lastEspError = 0;
+    volatile bool     m_lastSendDelivered = false;
+    volatile uint32_t m_sendQueueFailures = 0;
+    volatile uint32_t m_sendDeliveryFailures = 0;
+    volatile uint32_t m_rxDrops = 0;
+    volatile uint32_t m_rxRejected = 0;
+
+    void setError(Error error, int32_t espError = 0);
+    void resetReceiveQueue();
+    static bool isValidUnicastMac(const uint8_t mac[6]);
 };
 
 #endif // ESP_NOW_TRANSPORT_H

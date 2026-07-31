@@ -1,386 +1,193 @@
 #include "chess_storage.h"
-#include <Preferences.h>
-#include <cstring>
 
-// ─── Binary Save Format ──────────────────────────────────────────────
-//
-// Version 5 layout (adds XOR checksum; same fields as v4):
-//   [0]       version (0x05)
-//   [1..64]   board squares — 1 byte each: (type << 4) | (color << 0)
-//   [65]      sideToMove
-//   [66]      castleRights
-//   [67..68]  enPassantTarget (col, row)
-//   [69]      halfmoveClock
-//   [70..71]  fullmoveNumber (little-endian uint16)
-//   [72]      historyCount
-//   [73]      flags: bit0 = historyOverflow
-//   [74]      aiDifficulty
-//   [75]      aiColor
-//   [76]      localColor
-//   [77]      boardFlipped
-//   [78]      variant (ChessVariant)
-//   [79..80]  positionIndex (little-endian uint16)
-//   [81]      timeControl (TimeControl)
-//   [82..85]  timeWhiteMs (little-endian uint32)
-//   [86..89]  timeBlackMs (little-endian uint32)
-//   [90]      timerRunning
-//   [91..]    history records (16 bytes each)
-//   [last]    XOR checksum of all preceding bytes
-//
-// Each MoveRecord packed as 16 bytes:
-//   [0]  from.col, [1]  from.row
-//   [2]  to.col,   [3]  to.row
-//   [4]  promotion (PieceType)
-//   [5]  flags: bit0=isCastle, bit1=isEnPassant
-//   [6]  captured type, [7] captured color
-//   [8]  capturedSquare.col, [9] capturedSquare.row
-//   [10] prevCastleRights
-//   [11] prevHalfmoveClock
-//   [12] prevEnPassantTarget.col, [13] prevEnPassantTarget.row
-//   [14] movedPiece type, [15] movedPiece color
+#include "chess_storage_codec.h"
+#include "nvs_blob_store.h"
 
-static constexpr uint8_t SAVE_VERSION_V1 = 0x01;
-static constexpr uint8_t SAVE_VERSION_V2 = 0x02;
-static constexpr uint8_t SAVE_VERSION_V3 = 0x03;
-static constexpr uint8_t SAVE_VERSION_V4 = 0x04;
-static constexpr uint8_t SAVE_VERSION_V5 = 0x05;
-static constexpr uint8_t SAVE_VERSION = SAVE_VERSION_V5;
+#include <new>
 
-static constexpr size_t HEADER_SIZE_V1 = 78;
-static constexpr size_t RECORD_SIZE_V1 = 14;
-
-static constexpr size_t HEADER_SIZE_V2 = 79;
-static constexpr size_t RECORD_SIZE_V2 = 33;
-
-static constexpr size_t HEADER_SIZE_V3 = 91;
-static constexpr size_t RECORD_SIZE_V3 = 33;
-
-static constexpr size_t HEADER_SIZE = 91;
-static constexpr size_t RECORD_SIZE = 16;
+namespace {
 
 static constexpr const char* NVS_NAMESPACE = "chess";
 static constexpr const char* NVS_KEY = "game";
 
+ChessStorage::LoadStatus mapReadStatus(NvsBlobStore::ReadStatus status) {
+    switch (status) {
+        case NvsBlobStore::ReadStatus::Missing:
+            return ChessStorage::LoadStatus::Missing;
+        case NvsBlobStore::ReadStatus::WrongType:
+            return ChessStorage::LoadStatus::Corrupt;
+        case NvsBlobStore::ReadStatus::TooLarge:
+            return ChessStorage::LoadStatus::UnsupportedVersion;
+        case NvsBlobStore::ReadStatus::IoError:
+            return ChessStorage::LoadStatus::IoError;
+        case NvsBlobStore::ReadStatus::Ok:
+            break;
+    }
+    return ChessStorage::LoadStatus::IoError;
+}
+
+ChessStorage::LoadStatus mapDecodeStatus(
+        ChessStorageCodec::DecodeStatus status) {
+    switch (status) {
+        case ChessStorageCodec::DecodeStatus::Ok:
+            return ChessStorage::LoadStatus::Loaded;
+        case ChessStorageCodec::DecodeStatus::Corrupt:
+            return ChessStorage::LoadStatus::Corrupt;
+        case ChessStorageCodec::DecodeStatus::UnsupportedVersion:
+            return ChessStorage::LoadStatus::UnsupportedVersion;
+        case ChessStorageCodec::DecodeStatus::NoMemory:
+            return ChessStorage::LoadStatus::IoError;
+    }
+    return ChessStorage::LoadStatus::Corrupt;
+}
+
+ChessStorage::LoadResult decodeBlob(
+        const NvsBlobStore::Blob& blob,
+        ChessBoard& board, MoveRecord* history, uint8_t& historyCount,
+        ChessStorageCodec::SaveMetadata& metadata) {
+    ChessStorage::LoadResult result;
+    if (blob.size != 0 && blob.data) result.sourceVersion = blob.data[0];
+    const ChessStorageCodec::DecodeStatus decodeStatus =
+        ChessStorageCodec::decode(
+            blob.data, blob.size, board, history,
+            ChessStorageCodec::MAX_SAVED_HISTORY, historyCount, metadata);
+    result.status = mapDecodeStatus(decodeStatus);
+    if (result.status == ChessStorage::LoadStatus::Loaded) {
+        result.sourceVersion = metadata.sourceVersion;
+        result.participantsEmbedded = metadata.participantsEmbedded;
+        result.gameId = metadata.participantsEmbedded
+            ? metadata.participants.gameId : 0;
+    }
+    return result;
+}
+
+} // namespace
+
 namespace ChessStorage {
 
-static void packRecord(uint8_t* dst, const MoveRecord& rec) {
-    dst[0] = rec.move.from.col;
-    dst[1] = rec.move.from.row;
-    dst[2] = rec.move.to.col;
-    dst[3] = rec.move.to.row;
-    dst[4] = static_cast<uint8_t>(rec.move.promotion);
-    dst[5] = (rec.move.isCastle ? 0x01 : 0) | (rec.move.isEnPassant ? 0x02 : 0);
-    dst[6] = static_cast<uint8_t>(rec.captured.type);
-    dst[7] = static_cast<uint8_t>(rec.captured.color);
-    dst[8] = rec.capturedSquare.col;
-    dst[9] = rec.capturedSquare.row;
-    dst[10] = rec.prevCastleRights;
-    dst[11] = rec.prevHalfmoveClock;
-    dst[12] = rec.prevEnPassantTarget.col;
-    dst[13] = rec.prevEnPassantTarget.row;
-    dst[14] = static_cast<uint8_t>(rec.movedPiece.type);
-    dst[15] = static_cast<uint8_t>(rec.movedPiece.color);
-}
-
-static void unpackRecord(const uint8_t* src, MoveRecord& rec) {
-    rec.move.from = makeSquare(src[0], src[1]);
-    rec.move.to = makeSquare(src[2], src[3]);
-    rec.move.promotion = static_cast<PieceType>(src[4]);
-    rec.move.isCastle = (src[5] & 0x01) != 0;
-    rec.move.isEnPassant = (src[5] & 0x02) != 0;
-    rec.captured = Piece(static_cast<PieceType>(src[6]),
-                         static_cast<PieceColor>(src[7]));
-    rec.capturedSquare = makeSquare(src[8], src[9]);
-    rec.prevCastleRights = src[10];
-    rec.prevHalfmoveClock = src[11];
-    rec.prevEnPassantTarget = makeSquare(src[12], src[13]);
-    rec.movedPiece = Piece(static_cast<PieceType>(src[14]),
-                           static_cast<PieceColor>(src[15]));
-}
-
-// V1 unpacker for backward compatibility
-static void unpackRecordV1(const uint8_t* src, MoveRecord& rec) {
-    rec.move.from = makeSquare(src[0], src[1]);
-    rec.move.to = makeSquare(src[2], src[3]);
-    rec.move.promotion = static_cast<PieceType>(src[4]);
-    rec.move.isCastle = (src[5] & 0x01) != 0;
-    rec.move.isEnPassant = (src[5] & 0x02) != 0;
-    rec.captured = Piece(static_cast<PieceType>(src[6]),
-                         static_cast<PieceColor>(src[7]));
-    rec.capturedSquare = makeSquare(src[8], src[9]);
-    rec.prevCastleRights = src[10];
-    rec.prevHalfmoveClock = src[11];
-    rec.prevEnPassantTarget = makeSquare(src[12], src[13]);
-    rec.movedPiece = Piece{}; // Not stored in v1
-}
-
-static inline void writeU16LE(uint8_t* dst, uint16_t val) {
-    dst[0] = (uint8_t)(val & 0xFF);
-    dst[1] = (uint8_t)(val >> 8);
-}
-
-static inline void writeU32LE(uint8_t* dst, uint32_t val) {
-    dst[0] = (uint8_t)(val & 0xFF);
-    dst[1] = (uint8_t)((val >> 8) & 0xFF);
-    dst[2] = (uint8_t)((val >> 16) & 0xFF);
-    dst[3] = (uint8_t)((val >> 24) & 0xFF);
-}
-
-static inline uint16_t readU16LE(const uint8_t* src) {
-    return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
-}
-
-static inline uint32_t readU32LE(const uint8_t* src) {
-    return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-           ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
-}
-
-void saveGame(const ChessBoard& board,
+bool saveGame(const ChessBoard& board,
               const MoveRecord* history, uint8_t historyCount,
               bool historyOverflow,
               AIDifficulty aiDifficulty, PieceColor aiColor,
               PieceColor localColor, bool boardFlipped,
               ChessVariant variant, uint16_t positionIndex,
               TimeControl timeControl, uint32_t timeWhiteMs,
-              uint32_t timeBlackMs, bool timerRunning) {
+              uint32_t timeBlackMs, bool timerRunning,
+              const ActiveGameParticipants& participants) {
+    const size_t capacity = ChessStorageCodec::encodedSize(historyCount);
+    if (capacity == 0) return false;
+    uint8_t* buffer = new (std::nothrow) uint8_t[capacity];
+    if (!buffer) return false;
 
-    size_t dataSize = HEADER_SIZE + (size_t)historyCount * RECORD_SIZE;
-    size_t totalSize = dataSize + 1; // +1 for XOR checksum byte
+    ChessStorageCodec::SaveMetadata metadata;
+    metadata.historyOverflow = historyOverflow;
+    metadata.aiDifficulty = aiDifficulty;
+    metadata.aiColor = aiColor;
+    metadata.localColor = localColor;
+    metadata.boardFlipped = boardFlipped;
+    metadata.variant = variant;
+    metadata.positionIndex = positionIndex;
+    metadata.timeControl = timeControl;
+    metadata.timeWhiteMs = timeWhiteMs;
+    metadata.timeBlackMs = timeBlackMs;
+    metadata.timerRunning = timerRunning;
+    metadata.participants = participants;
 
-    // Use stack buffer for small saves, heap for large ones
-    uint8_t stackBuf[512];
-    uint8_t* buf = (totalSize <= sizeof(stackBuf)) ? stackBuf : new uint8_t[totalSize];
-
-    // Header
-    buf[0] = SAVE_VERSION;
-
-    // Board squares
-    for (uint8_t r = 0; r < 8; r++) {
-        for (uint8_t c = 0; c < 8; c++) {
-            Piece p = board.at(c, r);
-            buf[1 + r * 8 + c] = (static_cast<uint8_t>(p.type) << 4) |
-                                   static_cast<uint8_t>(p.color);
-        }
-    }
-
-    buf[65] = static_cast<uint8_t>(board.sideToMove());
-    buf[66] = board.castleRights();
-    buf[67] = board.enPassantTarget().col;
-    buf[68] = board.enPassantTarget().row;
-    buf[69] = board.halfmoveClock();
-    writeU16LE(buf + 70, board.fullmoveNumber());
-    buf[72] = historyCount;
-    buf[73] = historyOverflow ? 0x01 : 0x00;
-    buf[74] = static_cast<uint8_t>(aiDifficulty);
-    buf[75] = static_cast<uint8_t>(aiColor);
-    buf[76] = static_cast<uint8_t>(localColor);
-    buf[77] = boardFlipped ? 1 : 0;
-    buf[78] = static_cast<uint8_t>(variant);
-    writeU16LE(buf + 79, positionIndex);
-    buf[81] = static_cast<uint8_t>(timeControl);
-    writeU32LE(buf + 82, timeWhiteMs);
-    writeU32LE(buf + 86, timeBlackMs);
-    buf[90] = timerRunning ? 1 : 0;
-
-    // History records
-    for (uint8_t i = 0; i < historyCount; i++) {
-        packRecord(buf + HEADER_SIZE + (size_t)i * RECORD_SIZE, history[i]);
-    }
-
-    // Compute XOR checksum over all data bytes (v5+)
-    uint8_t xorSum = 0;
-    for (size_t i = 0; i < dataSize; i++) {
-        xorSum ^= buf[i];
-    }
-    buf[dataSize] = xorSum;
-
-    // Write to NVS
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, false);
-    prefs.putBytes(NVS_KEY, buf, totalSize);
-    prefs.end();
-
-    if (buf != stackBuf) delete[] buf;
+    size_t bytesWritten = 0;
+    const bool encoded = ChessStorageCodec::encode(
+        board, history, historyCount, metadata,
+        buffer, capacity, bytesWritten);
+    const bool saved = encoded && bytesWritten == capacity &&
+        NvsBlobStore::write(NVS_NAMESPACE, NVS_KEY, buffer, bytesWritten);
+    delete[] buffer;
+    return saved;
 }
 
-bool loadGame(ChessBoard& board,
-              MoveRecord* history, uint8_t& historyCount,
-              bool& historyOverflow,
-              AIDifficulty& aiDifficulty, PieceColor& aiColor,
-              PieceColor& localColor, bool& boardFlipped,
-              ChessVariant& variant, uint16_t& positionIndex,
-              TimeControl& timeControl, uint32_t& timeWhiteMs,
-              uint32_t& timeBlackMs, bool& timerRunning) {
-
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, true); // read-only
-    size_t len = prefs.getBytesLength(NVS_KEY);
-
-    // Need at least the v1 header to proceed
-    if (len < HEADER_SIZE_V1) {
-        prefs.end();
-        return false;
+LoadResult loadGame(ChessBoard& board,
+                    MoveRecord* history, uint8_t& historyCount,
+                    bool& historyOverflow,
+                    AIDifficulty& aiDifficulty, PieceColor& aiColor,
+                    PieceColor& localColor, bool& boardFlipped,
+                    ChessVariant& variant, uint16_t& positionIndex,
+                    TimeControl& timeControl, uint32_t& timeWhiteMs,
+                    uint32_t& timeBlackMs, bool& timerRunning,
+                    ActiveGameParticipants& participants) {
+    NvsBlobStore::Blob blob;
+    const NvsBlobStore::ReadStatus readStatus = NvsBlobStore::read(
+        NVS_NAMESPACE, NVS_KEY,
+        ChessStorageCodec::MAX_SUPPORTED_READ_BYTES, blob);
+    if (readStatus != NvsBlobStore::ReadStatus::Ok) {
+        LoadResult result;
+        result.status = mapReadStatus(readStatus);
+        return result;
     }
 
-    // Allocate buffer large enough
-    uint8_t* buf = new uint8_t[len];
-    prefs.getBytes(NVS_KEY, buf, len);
-    prefs.end();
+    ChessStorageCodec::SaveMetadata metadata;
+    uint8_t decodedHistoryCount = 0;
+    LoadResult result = decodeBlob(blob, board, history,
+                                   decodedHistoryCount, metadata);
+    if (result.status != LoadStatus::Loaded) return result;
 
-    uint8_t version = buf[0];
-    if (version != SAVE_VERSION_V1 && version != SAVE_VERSION_V2 &&
-        version != SAVE_VERSION_V3 && version != SAVE_VERSION_V4 &&
-        version != SAVE_VERSION_V5) {
-        delete[] buf;
-        return false;
+    historyCount = decodedHistoryCount;
+    historyOverflow = metadata.historyOverflow;
+    aiDifficulty = metadata.aiDifficulty;
+    aiColor = metadata.aiColor;
+    localColor = metadata.localColor;
+    boardFlipped = metadata.boardFlipped;
+    variant = metadata.variant;
+    positionIndex = metadata.positionIndex;
+    timeControl = metadata.timeControl;
+    timeWhiteMs = metadata.timeWhiteMs;
+    timeBlackMs = metadata.timeBlackMs;
+    timerRunning = metadata.timerRunning;
+    participants = metadata.participants;
+    return result;
+}
+
+LoadResult probe() {
+    NvsBlobStore::Blob blob;
+    const NvsBlobStore::ReadStatus readStatus = NvsBlobStore::read(
+        NVS_NAMESPACE, NVS_KEY,
+        ChessStorageCodec::MAX_SUPPORTED_READ_BYTES, blob);
+    if (readStatus != NvsBlobStore::ReadStatus::Ok) {
+        LoadResult result;
+        result.status = mapReadStatus(readStatus);
+        return result;
     }
 
-    // For v5+, verify XOR checksum before proceeding
-    if (version >= SAVE_VERSION_V5) {
-        // Checksum is the last byte; data is everything before it
-        if (len < 2) { delete[] buf; return false; }
-        size_t dataLen = len - 1;
-        uint8_t xorSum = 0;
-        for (size_t i = 0; i < dataLen; i++) {
-            xorSum ^= buf[i];
-        }
-        if (xorSum != buf[dataLen]) {
-            delete[] buf;
-            return false;
-        }
+    MoveRecord* history = new (std::nothrow)
+        MoveRecord[ChessStorageCodec::MAX_SAVED_HISTORY];
+    if (!history) {
+        LoadResult result;
+        result.status = LoadStatus::IoError;
+        return result;
     }
-
-    // --- Peek ahead: read variant and positionIndex BEFORE board.reset() ---
-    // This ensures Chess960 castle-column tracking is initialized correctly.
-    if (version >= SAVE_VERSION_V2) {
-        uint8_t rawVariant = buf[78];
-        // Reject saves from removed variants (Atomic was 1 in old enum)
-        // In v1-v3, Chess960 was 2; in v4+, Chess960 is 1
-        if (version < SAVE_VERSION_V4 && rawVariant == 1) {
-            // Old Atomic save — cannot load
-            delete[] buf;
-            return false;
-        }
-        if (version < SAVE_VERSION_V4 && rawVariant == 2) {
-            // Old Chess960 (was enum value 2, now 1)
-            variant = ChessVariant::Chess960;
-        } else {
-            variant = static_cast<ChessVariant>(rawVariant);
-        }
-    } else {
-        variant = ChessVariant::Standard;
-    }
-
-    if (version >= SAVE_VERSION_V3 && len >= HEADER_SIZE) {
-        positionIndex = readU16LE(buf + 79);
-    } else {
-        positionIndex = 518;
-    }
-
-    // Validate variant before using it
-    if (static_cast<uint8_t>(variant) > 1) {
-        delete[] buf;
-        return false;
-    }
-
-    // Set variant and positionIndex BEFORE reset so castle columns are correct
-    board.setVariant(variant);
-    board.setPositionIndex(positionIndex);
-    board.reset(); // Initializes castle-column tracking for the correct variant
-
-    // Board squares — overwrite the reset position with saved state
-    for (uint8_t r = 0; r < 8; r++) {
-        for (uint8_t c = 0; c < 8; c++) {
-            uint8_t packed = buf[1 + r * 8 + c];
-            PieceType type = static_cast<PieceType>(packed >> 4);
-            PieceColor color = static_cast<PieceColor>(packed & 0x0F);
-            board.set(c, r, (type == PieceType::None) ? Piece{} : Piece(type, color));
-        }
-    }
-
-    // Validate sideToMove
-    if (buf[65] > 1) { delete[] buf; return false; }
-    board.setSideToMove(static_cast<PieceColor>(buf[65]));
-    board.setCastleRights(buf[66]);
-    board.setEnPassantTarget(makeSquare(buf[67], buf[68]));
-    board.setHalfmoveClock(buf[69]);
-    board.setFullmoveNumber(readU16LE(buf + 70));
-
-    historyCount = buf[72];
-    if (historyCount > 250) historyCount = 250; // Clamp to MAX_HISTORY
-    historyOverflow = (buf[73] & 0x01) != 0;
-
-    // Validate enum values before casting
-    if (buf[74] > 3) { delete[] buf; return false; } // AIDifficulty: 0-3
-    if (buf[75] > 1) { delete[] buf; return false; } // aiColor: 0-1
-    if (buf[76] > 1) { delete[] buf; return false; } // localColor: 0-1
-    aiDifficulty = static_cast<AIDifficulty>(buf[74]);
-    aiColor = static_cast<PieceColor>(buf[75]);
-    localColor = static_cast<PieceColor>(buf[76]);
-    boardFlipped = buf[77] != 0;
-
-    // Timer fields (v3+) — variant and positionIndex already read above
-    if (version >= SAVE_VERSION_V3 && len >= HEADER_SIZE) {
-        if (buf[81] > 4) { delete[] buf; return false; } // TimeControl: 0-4
-        timeControl = static_cast<TimeControl>(buf[81]);
-        timeWhiteMs = readU32LE(buf + 82);
-        timeBlackMs = readU32LE(buf + 86);
-        timerRunning = buf[90] != 0;
-    } else {
-        timeControl = TimeControl::None;
-        timeWhiteMs = 0;
-        timeBlackMs = 0;
-        timerRunning = false;
-    }
-
-    // Determine record layout based on version
-    size_t headerSize, recordSize;
-    if (version >= SAVE_VERSION_V4) {
-        headerSize = HEADER_SIZE;
-        recordSize = RECORD_SIZE;
-    } else if (version == SAVE_VERSION_V3) {
-        headerSize = HEADER_SIZE_V3;
-        recordSize = RECORD_SIZE_V3;
-    } else if (version == SAVE_VERSION_V2) {
-        headerSize = HEADER_SIZE_V2;
-        recordSize = RECORD_SIZE_V2;
-    } else {
-        headerSize = HEADER_SIZE_V1;
-        recordSize = RECORD_SIZE_V1;
-    }
-
-    // Validate history fits in buffer
-    size_t expectedSize = headerSize + (size_t)historyCount * recordSize;
-    if (len < expectedSize) {
-        historyCount = 0;
-    }
-
-    // Unpack history records
-    for (uint8_t i = 0; i < historyCount; i++) {
-        if (version >= SAVE_VERSION_V2) {
-            unpackRecord(buf + headerSize + (size_t)i * recordSize, history[i]);
-        } else {
-            unpackRecordV1(buf + headerSize + (size_t)i * recordSize, history[i]);
-        }
-    }
-
-    delete[] buf;
-    return true;
+    ChessBoard board;
+    uint8_t historyCount = 0;
+    ChessStorageCodec::SaveMetadata metadata;
+    LoadResult result = decodeBlob(blob, board, history,
+                                   historyCount, metadata);
+    delete[] history;
+    return result;
 }
 
 bool hasSave() {
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, true);
-    size_t len = prefs.getBytesLength(NVS_KEY);
-    prefs.end();
-    return len >= HEADER_SIZE_V1; // Accept v1, v2, and v3
+    return probe().status == LoadStatus::Loaded;
 }
 
-void clearSave() {
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, false);
-    prefs.remove(NVS_KEY);
-    prefs.end();
+bool clearSave() {
+    return NvsBlobStore::erase(NVS_NAMESPACE, NVS_KEY);
+}
+
+bool clearIfGameId(uint32_t expectedGameId) {
+    if (expectedGameId == 0) return false;
+    const LoadResult result = probe();
+    if (result.status == LoadStatus::Missing) return true;
+    if (result.status != LoadStatus::Loaded ||
+        !result.participantsEmbedded || result.gameId != expectedGameId) {
+        return false;
+    }
+    return clearSave();
 }
 
 } // namespace ChessStorage

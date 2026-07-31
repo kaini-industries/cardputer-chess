@@ -6,7 +6,7 @@ A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI
 
 ## Development Status
 
-The v0.19.1 release corrects invalid and pre-solved puzzle positions, hardens puzzle validation, restores reliable menu exits from Local and AI games, and adds legal-destination cursor navigation backed by native regression tests. The v0.19.0 audit remediation remains documented in the [July 2026 deep technical audit](audits/2026-07-14-cardputer-chess-deep-audit.md).
+The v0.20.0 release implements the first post-testing improvement pass: conventional chess-clock behavior, synchronized timed multiplayer, named ESP-NOW opponents, a more reliable session protocol, profiles and recent result summaries, draw offers, a +15-second time gift, clarified review labels, and revised keyboard controls. Full premoves, complete-game replay archives, and a win celebration remain intentionally deferred as larger enhancements.
 
 ## Features
 
@@ -16,16 +16,18 @@ The v0.19.1 release corrects invalid and pre-solved puzzle positions, hardens pu
 - **Time controls**: Bullet (1+0), Blitz (3+2, 5+3), Rapid (10+0), or untimed
 - Five game modes: local pass-and-play, vs AI, wireless multiplayer (host/join), and puzzles
 - AI opponent with three difficulty levels and an opening book
-- Wireless multiplayer over ESP-NOW (no WiFi network required)
+- Wireless multiplayer over ESP-NOW with named opponents and acknowledged, session-scoped moves
+- Draw offers and an optional **+15 seconds** gift in timed online games
+- Up to four persistent player profiles with statistics and 16 recent completed-game summaries
 - **Puzzle mode** with mate-in-1, mate-in-2, and tactical puzzles with progress tracking
-- **Pixel art sprites** with toggle to classic letter rendering (press **T**)
-- **Black & white board** toggle for high-contrast play (press **B**)
+- **Pixel art sprites** with toggle to classic letter rendering (press **B**)
+- **Black & white board** toggle for high-contrast play (press **T**)
 - Animated piece movement between turns
 - **Move review mode** — step through the game's move history
 - Move history panel with standard algebraic notation (SAN)
 - Persistent game saving — games auto-save after each move and survive power cycles
-- Undo support (local and AI modes)
-- Resign support (online mode)
+- Undo support in untimed local and AI games
+- Resign and draw-offer support (online mode)
 - Status bar showing current turn, move number, check/game-over indicators, and clock
 
 ## Game Modes
@@ -38,10 +40,11 @@ On launch, a lobby screen presents the available options. If a saved game exists
 | **Local** | Pass-and-play on a single device. The board auto-rotates after each move so the current player's pieces are always at the bottom. |
 | **vs AI** | Play against the computer. Choose variant, time control, difficulty (Easy/Medium/Hard), and your color (White/Black). |
 | **Host** | Broadcast a game over ESP-NOW and wait for an opponent to join. Choose variant and time control before hosting. Host plays White. |
-| **Join** | Scan for nearby hosts. A list shows discovered hosts with their variant and time control. Select a host to connect. Joiner plays Black. |
+| **Join** | Scan for nearby hosts. The list shows each host's profile name, MAC suffix, variant, and time control. Select a host to connect. Joiner plays Black. |
+| **Profiles** | Create, rename, activate, or delete up to four profiles; inspect statistics and recent completed-game summaries. |
 | **Puzzles** | Solve chess puzzles organized by category (mate-in-1, mate-in-2, tactics). Progress is saved across sessions. |
 
-Starting a new game (Local, vs AI, Host, or Join) clears any existing save. Network games are not saved since the connection cannot survive a power cycle.
+Starting a new Local or AI game asks before replacing an existing resumable game. Online games and puzzles leave that save intact; online sessions themselves are not resumable because the connection cannot survive a power cycle.
 
 ### Lobby Flow
 
@@ -49,7 +52,7 @@ When starting a Local, vs AI, or Host game, the lobby walks through a setup flow
 
 1. **Variant** — Standard or Chess960
 2. **Time Control** — No Timer, 1+0, 3+2, 5+3, or 10+0
-3. **Mode-specific** — AI games continue to difficulty and color selection
+3. **Mode-specific** — Local games choose White and Black participants; AI games continue to difficulty and color selection
 
 Each step has a **Back** button to return to the previous choice.
 
@@ -70,7 +73,15 @@ Castling in Chess960 follows the standard "king ends on c1/g1" convention regard
 | **5+3** (Blitz) | 5 minutes | +3 seconds per move |
 | **10+0** (Rapid) | 10 minutes | None |
 
-Clocks are displayed in the status bar. When a player's time runs out, they lose on time. Timer state is included in saved games.
+Clocks use conventional chess behavior: White's clock starts when the board is ready; completing a move stops the mover's clock, applies the increment, and starts the opponent's clock. Black's clock therefore starts only after White completes the first move. When a player's time runs out, they lose on time. Timer state is included in saved games.
+
+In online games, each device is authoritative for its local player's clock. Moves carry the mover's post-increment time, while heartbeats correct the active remote clock.
+
+## Profiles and Recent Games
+
+The **Profiles** lobby menu supports up to four named players. The active profile supplies the name advertised over ESP-NOW and is used automatically for AI and online statistics. Local pass-and-play lets you select a profile or Guest independently for White and Black.
+
+The history view stores the 16 most recent completed-game summaries: participants, result, finish reason, mode, variant, time control, ply count, and final clock values. It is intentionally a lightweight results history, not a full saved-game replay archive.
 
 ## AI Opponent
 
@@ -106,7 +117,9 @@ In multi-move puzzles (mate-in-2, tactics), the opponent's response is auto-play
 
 ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network setup needed. Both devices just need to be within WiFi range (~30m indoors). Pairing times out after 60 seconds.
 
-The host broadcasts a discovery message every 500ms. Joiners see a list of available hosts with their variant and time control settings. When a joiner selects a host, both devices exchange handshake messages and the game begins. Moves are sent with sequence numbers and acknowledged to ensure reliable delivery.
+The host broadcasts a discovery message every 500ms. Joiners see the host's profile name, MAC suffix, variant, and time control. Pairing requests and game-start packets are retried until acknowledged. During play, protocol-v5 packets are bound to a nonzero game and session ID, filtered to the selected peer MAC, sequence checked, acknowledged, and protected against stale or divergent board state with position epochs and hashes. Clock heartbeats, draw responses, acknowledged time gifts, and terminal results also use session-scoped validation and retry handling.
+
+Both devices must run v0.20.0 or another protocol-v5 build; earlier multiplayer protocol versions are intentionally rejected.
 
 ## Controls
 
@@ -118,19 +131,23 @@ The host broadcasts a discovery message every 500ms. Joiners see a list of avail
 | **.** or **FN + .** | Move cursor down |
 | **,** or **FN + ,** | Move cursor left |
 | **/** or **FN + /** | Move cursor right |
-| **Enter** or **Space** | Select piece / confirm move |
-| **Esc** (side button) | Deselect a piece; from an idle Local/AI board, open the Leave Game dialog |
-| **U** | Undo last move (local/AI only) |
+| **Enter** | Select piece / confirm move |
+| **Space** | Cycle through all legal destination squares for the selected piece |
+| **Esc**, **Delete**, or **Backspace** | Cancel the selected move; idle **Esc** opens the Leave Game dialog in Local/AI games |
+| **U** | Undo last move (untimed local/AI games only) |
 | **N** | Open the Leave Game dialog immediately (local/AI only) |
-| **R** | Resign with confirmation (online only) |
-| **V** | Enter move review mode |
-| **T** | Toggle between pixel art sprites and letter pieces |
-| **B** | Toggle black & white board colors |
+| **R** | Resign with confirmation on your turn (online only) |
+| **D** | Offer a draw (online only) |
+| **G** | Give the opponent 15 seconds, with confirmation (timed online games only) |
+| **V** | Enter move review mode during an untimed Local/AI game |
+| **B** | Toggle between pixel art sprites and letter pieces |
+| **T** | Toggle black & white board colors |
 | **F** | Flip board orientation |
+| **H** or **I** | Open contextual controls help (**H** remains Hint in puzzles) |
 
 > The Cardputer has no hardware arrow keys. The `;` `,` `.` `/` keys are mapped to arrows at the framework level, so they work as directional controls in all scenes.
 
-After selecting a piece, directional controls jump between its legal destination squares instead of stepping through every board cell. Press **Esc** to return the cursor to the selected piece and cancel the selection.
+After selecting a piece, directional controls jump between its legal destination squares instead of stepping through every board cell. **Space** cycles the same unique destinations in display order. Press **Esc**, **Delete**, or **Backspace** to return the cursor to the selected piece and cancel the selection.
 
 The Leave Game dialog warns before returning to the lobby; confirming **Menu** discards the current saved game.
 
@@ -145,7 +162,7 @@ Step through the game's move history to analyze past positions.
 | **Esc** | Exit review mode |
 | **N** | Open the Leave Game dialog during a live Local/AI game |
 
-Review mode is accessible during play (press **V**) or from the game-over dialog via the **Review** button.
+The top-left review value is labeled **Ply current/total**. The top-right value is a White-relative evaluation in pawns (`Eval +0.35` favors White, `Eval -0.35` favors Black), or a clear `Mate W`, `Mate B`, or `Draw` result. Review mode is accessible during untimed Local/AI play (press **V**) or from the game-over dialog via the **Review** button. Live timed and online review is deferred until game over so it cannot pause a competitive clock or replace the synchronized network position with a historical board.
 
 ### In Lobby
 
@@ -208,7 +225,10 @@ flashing at offset `0x10000`.
 │   ├── chess_ai.h/.cpp         # AI opponent (alpha-beta with iterative deepening)
 │   ├── chess_opening_book.h/.cpp # Opening book for AI variety
 │   ├── chess960.h              # Chess960 position generation
-│   ├── chess_storage.h/.cpp    # Persistent game save/load (ESP32 NVS)
+│   ├── chess_storage.h/.cpp    # Persistent active-game save/load (ESP32 NVS)
+│   ├── chess_clock.h/.cpp      # Deterministic conventional chess clock
+│   ├── game_records.h/.cpp     # Profiles, statistics, and result summaries
+│   ├── profile_storage.h/.cpp  # CRC-checked profile/history persistence
 │   ├── chess_net_protocol.h    # Network message types and protocol
 │   ├── esp_now_transport.h/.cpp  # ESP-NOW send/receive layer
 │   ├── puzzle_data.h/.cpp      # Embedded puzzle database

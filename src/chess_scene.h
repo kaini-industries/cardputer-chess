@@ -5,9 +5,11 @@
 #include "chess_board.h"
 #include "chess_rules.h"
 #include "chess_ai.h"
+#include "chess_clock.h"
 #include "chess_net_protocol.h"
 #include "chess_storage.h"
 #include "cursor_navigation.h"
+#include "game_records.h"
 #include "puzzle_data.h"
 #include "puzzle_storage.h"
 
@@ -55,6 +57,9 @@ private:
 
     // ── Chess Engine State ────────────────────────────────────────
     ChessBoard m_board;
+    // Display-only historical projection. Networking, persistence, and
+    // terminal validation always retain m_board as the authoritative state.
+    ChessBoard m_reviewBoard;
 
     // Selection
     Square   m_selectedSquare = NO_SQUARE;
@@ -92,9 +97,20 @@ private:
 
     // ── Timer State ──────────────────────────────────────────
     TimeControl m_timeControl = TimeControl::None;
-    uint32_t m_timeWhiteMs = 0;
-    uint32_t m_timeBlackMs = 0;
-    bool m_timerRunning = false;
+    ChessClock m_clock;
+    bool m_clockPausedForReview = false;
+    bool m_clockPausedForExit = false;
+    GameOutcome m_resultOutcome = GameOutcome::None;
+    TerminationReason m_termination = TerminationReason::None;
+    bool m_resultRecorded = false;
+    bool m_terminalSummaryReady = false;
+    bool m_terminalJournaled = false;
+    GameSummary m_terminalSummary;
+    uint32_t m_lastResultSaveAttempt = 0;
+    uint32_t m_terminalDrainUntil = 0;
+    ActiveGameParticipants m_participants;
+    bool m_gameSaveDirty = false;
+    uint32_t m_lastGameSaveAttempt = 0;
 
     // ── Review State ─────────────────────────────────────────
     uint8_t m_reviewIndex = 0;
@@ -124,15 +140,67 @@ private:
     bool        m_boardFlipped = false;
     bool        m_applyingRemoteMove = false;
 
-    // Network ack/retransmit state
-    bool     m_awaitingAck = false;
-    uint8_t  m_lastSentSeq = 0;
-    uint32_t m_lastSendTime = 0;
-    uint8_t  m_retryCount = 0;
-    MoveNetMsg m_lastSentMove;    // For retransmission
+    // Session identity and peer metadata.
+    uint16_t m_networkGameId = 0;
+    uint32_t m_sessionId = 0;
+    uint8_t  m_opponentMac[6] = {};
+    char     m_opponentName[NET_DISPLAY_NAME_BYTES] = {};
+    bool     m_reackGameStart = false;
+
+    // Reliable move stream. Sequences are per-sender and independent of the
+    // bounded local review history.
+    bool       m_awaitingAck = false;
+    uint16_t   m_nextMoveSequence = 1;
+    uint16_t   m_lastSentSeq = 0;
+    uint16_t   m_expectedRemoteSequence = 1;
+    uint16_t   m_lastAppliedRemoteSequence = 0;
+    uint32_t   m_lastRemotePreHash = 0;
+    uint32_t   m_lastRemotePostHash = 0;
+    uint32_t   m_lastMoveSendTime = 0;
+    uint32_t   m_lastHeartbeatSendTime = 0;
+    uint8_t    m_moveRetryCount = 0;
+    MoveNetMsg m_lastSentMove;
+    uint32_t   m_lastSentPostHash = 0;
+    uint16_t   m_positionEpoch = 0;
+    bool       m_missingRemoteMove = false;
+    uint16_t   m_missingRemoteEpoch = 0;
+    uint32_t   m_missingRemoteMoveSince = 0;
+
+    // Reliable non-move controls (draws, time gifts, terminal results).
+    bool          m_controlAwaitingAck = false;
+    uint16_t      m_nextControlEventId = 1;
+    uint16_t      m_expectedRemoteControlEventId = 1;
+    uint16_t      m_lastRemoteControlEventId = 0;
+    ControlNetMsg m_lastRemoteControl;
+    NetAckStatus  m_lastRemoteControlStatus = NetAckStatus::Rejected;
+    uint16_t      m_localDrawOfferEventId = 0;
+    uint32_t      m_localDrawOfferBoardHash = 0;
+    uint16_t      m_remoteDrawOfferEventId = 0;
+    uint16_t      m_lastLocalDrawAcceptEventId = 0;
+    bool          m_finishDrawOnAck = false;
+    bool          m_clockPausedForDrawAccept = false;
+    ControlNetMsg m_pendingControl;
+    uint32_t      m_lastControlSendTime = 0;
+    uint8_t       m_controlRetryCount = 0;
+    bool          m_hasQueuedControl = false;
+    ControlNetMsg m_queuedControl;
+
+    // Time gifts commit remotely before they update the giver's mirror.
+    bool       m_timeGiftPending = false;
+    PieceColor m_timeGiftRecipient = PieceColor::White;
+    bool       m_deferredLocalTimeout = false;
+    PieceColor m_deferredFlaggedSide = PieceColor::White;
+
+    // A received move carries the mover's authoritative post-increment clock.
+    bool     m_remoteClockPending = false;
+    uint32_t m_remoteMoverRemainingMs = 0;
+
     bool     m_disconnectShown = false;
     uint32_t m_disconnectGraceUntil = 0; // Grace period after "Wait" click
-    uint16_t m_sessionId = 0;
+    // Updated only after a packet passes this game's session/header checks.
+    // Raw frames from the same MAC (for example a new lobby broadcast) must
+    // not keep an abandoned game looking connected.
+    uint32_t m_lastValidPeerPacketTime = 0;
 
     // ── Widgets ───────────────────────────────────────────────────
     StatusBar m_statusBar;
@@ -143,6 +211,7 @@ private:
     Modal     m_promotionModal;
     Modal     m_gameOverModal;
     Modal     m_exitModal;
+    Modal     m_actionModal;
 
     // ── Methods ───────────────────────────────────────────────────
     void newGame();
@@ -153,15 +222,30 @@ private:
     void executeMove(const Move& move);
     void undoLastMove();
     void updateStatusBar();
+    void updateHintBar();
+    void updateMovesLabel();
     void updateBoardHighlights();
     void addMoveToList(const char* san);
-    void checkGameEnd();
+    void checkGameEnd(bool notifyPeer = true,
+                      uint32_t terminalTimestamp = 0);
     void showPromotionModal(const Move& baseMove);
     void showGameOverModal(const char* title, const char* message);
+    void finishGame(GameOutcome outcome, TerminationReason termination,
+                    const char* title, const char* message,
+                    bool notifyPeer = true,
+                    uint32_t terminalTimestamp = 0);
+    bool recordCompletedGame();
+    void captureTerminalSummary();
+    void finishDeferredTimeoutIfReady();
+    void showHelpModal();
+    void closeActionModal();
+    void cycleLegalMove();
     void requestExitToMenu();
     void cancelExitToMenu();
-    void leaveToMenu();
-    void leaveOnlineGame();
+    void leaveToMenu(bool discardUnsavedResult = false);
+    void leaveOnlineGame(bool force = false,
+                         bool discardUnsavedResult = false);
+    void showUnsavedResultModal(bool online);
     bool navigateBoardCursor(uint8_t key, uint8_t currentCol, uint8_t currentRow,
                              uint8_t& nextCol, uint8_t& nextRow);
     void rebuildMoveList();
@@ -175,14 +259,35 @@ private:
     static void formatTime(char* buf, uint8_t bufLen, uint32_t ms);
 
     // Persistence
-    void saveGameState();
+    bool saveGameState();
 
     // Network methods
     void pollNetwork();
-    void sendMove(const Move& move);
+    void sendMove(const Move& move, uint32_t preBoardHash,
+                  uint32_t postBoardHash);
     void onRemoteMoveReceived(const MoveNetMsg& msg);
-    void onConnectionLost();
+    void onConnectionLost(const char* message = "Lost connection");
+    void noteValidPeerPacket(uint32_t now);
+    void restoreGameInputFocus();
     void sendHeartbeat();
+    void sendGameStartAck();
+    void sendMoveAck(const MoveNetMsg& msg, NetAckStatus status,
+                     uint32_t boardHash);
+    bool sendControl(NetControlType control, uint8_t arg0 = 0,
+                     uint8_t arg1 = 0, uint16_t relatedEventId = 0,
+                     uint32_t valueMs = 0, bool replacePending = false);
+    void sendQueuedControl(bool reusePendingEventId = false);
+    void sendControlAck(const ControlNetMsg& msg, NetAckStatus status);
+    void onControlReceived(const ControlNetMsg& msg);
+    void offerDraw();
+    void giveOpponentTime();
+    void confirmResign();
+    void sendGameEnd(GameOutcome outcome, TerminationReason termination,
+                     uint16_t relatedEventId = 0);
+    ControlNetMsg buildControl(NetControlType control, uint8_t arg0,
+                               uint8_t arg1, uint16_t relatedEventId,
+                               uint32_t valueMs) const;
+    bool localMoveBlockedByControl() const;
 
     // Coordinate helpers (board flipping for Black perspective)
     uint8_t toGridRow(uint8_t boardRow) const {
@@ -208,12 +313,18 @@ public:
     // Called by LobbyScene to set time control
     void setTimeControl(TimeControl tc);
 
+    // Called by LobbyScene before a local or AI game begins.
+    void setParticipants(const ActiveGameParticipants& participants);
+
     // Called by LobbyScene to configure AI mode before pushing
     void setAIMode(AIDifficulty difficulty, PieceColor aiColor);
     void clearAIMode();
 
     // Called by LobbyScene to configure network mode before pushing
-    void setNetworkMode(PieceColor localColor, uint16_t sessionId = 0);
+    void setNetworkMode(PieceColor localColor, uint32_t sessionId,
+                        uint16_t gameId, const uint8_t opponentMac[6],
+                        const char* localName, const char* opponentName,
+                        bool reackGameStart);
     void clearNetworkMode();
 
     // Called by LobbyScene to resume a saved game
