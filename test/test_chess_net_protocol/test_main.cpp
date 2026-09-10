@@ -19,7 +19,7 @@ void assertGameHeaderDefaults(const NetGameHeader& header,
 }
 
 void test_wire_layout_has_exact_bounded_packet_sizes() {
-    TEST_ASSERT_EQUAL_UINT8(5, NET_PROTOCOL_VERSION);
+    TEST_ASSERT_EQUAL_UINT8(6, NET_PROTOCOL_VERSION);
     TEST_ASSERT_EQUAL_UINT8(32, NET_PACKET_MAX_SIZE);
 
     TEST_ASSERT_EQUAL_UINT32(4, sizeof(NetPairingHeader));

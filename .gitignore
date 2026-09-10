@@ -6,4 +6,5 @@
 .claude
 .DS_Store
 firmware/*.bin
+/release/
 audits/

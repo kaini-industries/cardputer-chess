@@ -238,7 +238,7 @@ void test_crc_valid_nonterminated_fixed_names_are_rejected() {
             historyCount, decodedMetadata)));
 }
 
-void test_chess_v6_round_trip_embeds_participants() {
+void test_chess_current_round_trip_embeds_participants() {
     ChessBoard board;
     Move move;
     move.from = makeSquare(4, 1);
@@ -250,7 +250,7 @@ void test_chess_v6_round_trip_embeds_participants() {
     size_t encodedSize = 0;
     TEST_ASSERT_TRUE(ChessStorageCodec::encode(
         board, history, 1, metadata, encoded, sizeof(encoded), encodedSize));
-    TEST_ASSERT_EQUAL_UINT8(6, encoded[0]);
+    TEST_ASSERT_EQUAL_UINT8(ChessStorageCodec::CURRENT_VERSION, encoded[0]);
 
     ChessBoard decodedBoard;
     MoveRecord decodedHistory[ChessStorageCodec::MAX_SAVED_HISTORY];
@@ -263,7 +263,7 @@ void test_chess_v6_round_trip_embeds_participants() {
             ChessStorageCodec::MAX_SAVED_HISTORY, decodedCount,
             decodedMetadata)));
     TEST_ASSERT_EQUAL_UINT8(1, decodedCount);
-    TEST_ASSERT_EQUAL_UINT8(6, decodedMetadata.sourceVersion);
+    TEST_ASSERT_EQUAL_UINT8(ChessStorageCodec::CURRENT_VERSION, decodedMetadata.sourceVersion);
     TEST_ASSERT_TRUE(decodedMetadata.participantsEmbedded);
     TEST_ASSERT_EQUAL_UINT32(metadata.participants.gameId,
                              decodedMetadata.participants.gameId);
@@ -273,7 +273,7 @@ void test_chess_v6_round_trip_embeds_participants() {
     TEST_ASSERT_TRUE(history[0].move == decodedHistory[0].move);
 }
 
-void test_chess_v6_rejects_every_truncation_and_trailing_data() {
+void test_chess_current_rejects_every_truncation_and_trailing_data() {
     ChessBoard board;
     ChessStorageCodec::SaveMetadata metadata = makeMetadata(board);
     uint8_t encoded[ChessStorageCodec::MAX_ENCODED_BYTES + 1];
@@ -307,7 +307,7 @@ void test_chess_v6_rejects_every_truncation_and_trailing_data() {
             ChessStorageCodec::MAX_SAVED_HISTORY, count, decoded)));
 }
 
-void test_chess_v6_rejects_bad_crc_semantics_and_chess960_index() {
+void test_chess_current_rejects_bad_crc_semantics_and_chess960_index() {
     ChessBoard board;
     ChessStorageCodec::SaveMetadata metadata = makeMetadata(board);
     uint8_t encoded[ChessStorageCodec::MAX_ENCODED_BYTES];
@@ -347,7 +347,7 @@ void test_chess_v6_rejects_bad_crc_semantics_and_chess960_index() {
         encoded, sizeof(encoded), size));
 }
 
-void test_chess_v6_rejects_invalid_fields_and_records() {
+void test_chess_current_rejects_invalid_fields_and_records() {
     ChessBoard board;
     Move move;
     move.from = makeSquare(4, 1);
@@ -444,72 +444,79 @@ Move repeatingKnightMove(uint16_t ply) {
     return move;
 }
 
-void test_overflow_requires_full_legal_prefix_and_later_final_board() {
+void test_overflow_validates_recent_history_and_migrates_legacy_prefix() {
     ChessBoard finalBoard;
-    MoveRecord history[ChessStorageCodec::MAX_SAVED_HISTORY];
-    for (uint16_t ply = 0; ply < ChessStorageCodec::MAX_SAVED_HISTORY;
-         ++ply) {
-        history[ply] = finalBoard.makeMove(repeatingKnightMove(ply));
+    MoveRecord prefix[250], recent[250];
+    for (unsigned ply = 0; ply < 251; ++ply) {
+        const auto record = finalBoard.makeMove(repeatingKnightMove(ply));
+        if (ply < 250) prefix[ply] = record;
+        if (ply > 0) recent[ply - 1] = record;
     }
-    finalBoard.makeMove(
-        repeatingKnightMove(ChessStorageCodec::MAX_SAVED_HISTORY));
-    ChessStorageCodec::SaveMetadata metadata = makeMetadata(finalBoard);
+    auto metadata = makeMetadata(finalBoard);
     metadata.historyOverflow = true;
-
     uint8_t encoded[ChessStorageCodec::MAX_ENCODED_BYTES];
     size_t size = 0;
-    TEST_ASSERT_TRUE(ChessStorageCodec::encode(
-        finalBoard, history, ChessStorageCodec::MAX_SAVED_HISTORY,
+    TEST_ASSERT_TRUE(ChessStorageCodec::encode(finalBoard, recent, 250,
         metadata, encoded, sizeof(encoded), size));
-
     ChessBoard decoded;
-    MoveRecord decodedHistory[ChessStorageCodec::MAX_SAVED_HISTORY];
-    uint8_t decodedCount = 0;
+    MoveRecord decodedHistory[250];
+    uint8_t count = 0;
     ChessStorageCodec::SaveMetadata decodedMetadata;
-    TEST_ASSERT_EQUAL_UINT8(
-        static_cast<uint8_t>(ChessStorageCodec::DecodeStatus::Ok),
-        static_cast<uint8_t>(ChessStorageCodec::decode(
-            encoded, size, decoded, decodedHistory,
-            ChessStorageCodec::MAX_SAVED_HISTORY,
-            decodedCount, decodedMetadata)));
+    TEST_ASSERT_EQUAL(ChessStorageCodec::DecodeStatus::Ok,
+        ChessStorageCodec::decode(encoded, size, decoded, decodedHistory,
+            250, count, decodedMetadata));
+    TEST_ASSERT_EQUAL_UINT8(250, count);
     TEST_ASSERT_TRUE(decodedMetadata.historyOverflow);
-    TEST_ASSERT_EQUAL_UINT8(ChessStorageCodec::MAX_SAVED_HISTORY,
-                            decodedCount);
     assertBoardsEqual(finalBoard, decoded);
-
-    TEST_ASSERT_FALSE(ChessStorageCodec::encode(
-        finalBoard, history, ChessStorageCodec::MAX_SAVED_HISTORY - 1,
-        metadata, encoded, sizeof(encoded), size));
-
-    // A full prefix marked overflow must have at least one later final ply.
-    ChessBoard prefixBoard;
-    for (uint16_t ply = 0; ply < ChessStorageCodec::MAX_SAVED_HISTORY;
-         ++ply) {
-        prefixBoard.makeMove(repeatingKnightMove(ply));
+    for (unsigned i = 0; i < count; ++i) {
+        TEST_ASSERT_TRUE(decodedHistory[i].move == recent[i].move);
+        TEST_ASSERT_TRUE(decodedHistory[i].movedPiece == recent[i].movedPiece);
     }
-    metadata = makeMetadata(prefixBoard);
-    metadata.historyOverflow = true;
-    TEST_ASSERT_FALSE(ChessStorageCodec::encode(
-        prefixBoard, history, ChessStorageCodec::MAX_SAVED_HISTORY,
+    TEST_ASSERT_FALSE(ChessStorageCodec::encode(finalBoard, prefix, 250,
         metadata, encoded, sizeof(encoded), size));
-
+    // Reject overflow markers on games that never reached the history limit.
     ChessBoard shortBoard;
-    for (uint16_t ply = 0;
-         ply < ChessStorageCodec::MAX_SAVED_HISTORY - 1; ++ply) {
-        shortBoard.makeMove(repeatingKnightMove(ply));
-    }
-    metadata = makeMetadata(shortBoard);
-    TEST_ASSERT_TRUE(ChessStorageCodec::encode(
-        shortBoard, history, ChessStorageCodec::MAX_SAVED_HISTORY - 1,
+    auto shortMetadata = makeMetadata(shortBoard);
+    shortMetadata.historyOverflow = true;
+    TEST_ASSERT_FALSE(ChessStorageCodec::encode(shortBoard, nullptr, 0,
+        shortMetadata, encoded, sizeof(encoded), size));
+
+    TEST_ASSERT_TRUE(ChessStorageCodec::encode(finalBoard, recent, 250,
         metadata, encoded, sizeof(encoded), size));
-    encoded[73] = 1;
+    // Actual v6 layout held the first 250 records. Check that migration validates
+    // that prefix, then discards it instead of undoing it against the final board.
+    encoded[0] = 6;
+    for (unsigned i = 0; i < 250; ++i) {
+        const auto& r = prefix[i];
+        auto* out = encoded + 131 + 16 * i;
+        out[0] = r.move.from.col; out[1] = r.move.from.row;
+        out[2] = r.move.to.col; out[3] = r.move.to.row;
+        out[4] = static_cast<uint8_t>(r.move.promotion);
+        out[5] = 0; out[6] = static_cast<uint8_t>(r.captured.type);
+        out[7] = static_cast<uint8_t>(r.captured.color);
+        out[8] = r.capturedSquare.col; out[9] = r.capturedSquare.row;
+        out[10] = r.prevCastleRights; out[11] = r.prevHalfmoveClock;
+        out[12] = r.prevEnPassantTarget.col; out[13] = r.prevEnPassantTarget.row;
+        out[14] = static_cast<uint8_t>(r.movedPiece.type);
+        out[15] = static_cast<uint8_t>(r.movedPiece.color);
+    }
     refreshV6Crc(encoded, size);
-    TEST_ASSERT_EQUAL_UINT8(
-        static_cast<uint8_t>(ChessStorageCodec::DecodeStatus::Corrupt),
-        static_cast<uint8_t>(ChessStorageCodec::decode(
-            encoded, size, decoded, decodedHistory,
-            ChessStorageCodec::MAX_SAVED_HISTORY,
-            decodedCount, decodedMetadata)));
+    TEST_ASSERT_EQUAL(ChessStorageCodec::DecodeStatus::Ok,
+        ChessStorageCodec::decode(encoded, size, decoded, decodedHistory,
+            250, count, decodedMetadata));
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+    TEST_ASSERT_TRUE(decodedMetadata.historyOverflow);
+    TEST_ASSERT_TRUE(decodedMetadata.participantsEmbedded);
+    assertBoardsEqual(finalBoard, decoded);
+    TEST_ASSERT_TRUE(ChessStorageCodec::encode(decoded, decodedHistory, count,
+        decodedMetadata, encoded, sizeof(encoded), size));
+    TEST_ASSERT_EQUAL(ChessStorageCodec::DecodeStatus::Ok,
+        ChessStorageCodec::decode(encoded, size, decoded, decodedHistory,
+            250, count, decodedMetadata));
+    // Start a fresh, valid recent suffix after resuming an overflow save.
+    decodedHistory[count++] = decoded.makeMove(repeatingKnightMove(251));
+    TEST_ASSERT_TRUE(ChessStorageCodec::encode(decoded, decodedHistory, count,
+        decodedMetadata, encoded, sizeof(encoded), size));
 }
 
 void encodeLegacyBoardHeader(uint8_t* buffer, const ChessBoard& board) {
@@ -741,6 +748,15 @@ void test_v1_castling_reconstructs_moved_king_for_review_undo() {
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PieceColor::White),
         static_cast<uint8_t>(history[6].movedPiece.color));
 
+    for (unsigned i = 0; i < count; ++i) {
+        TEST_ASSERT_TRUE(history[i].movedPiece == originals[i].movedPiece);
+    }
+    metadata.participants = makeParticipants();
+    uint8_t migrated[ChessStorageCodec::MAX_ENCODED_BYTES];
+    size_t migratedSize = 0;
+    TEST_ASSERT_TRUE(ChessStorageCodec::encode(decoded, history, count,
+        metadata, migrated, sizeof(migrated), migratedSize));
+
     decoded.unmakeMove(history[6]);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PieceType::King),
         static_cast<uint8_t>(decoded.at(4, 0).type));
@@ -787,6 +803,12 @@ void test_v1_ordinary_non_capture_uses_destination_capture_square() {
             ChessStorageCodec::MAX_SAVED_HISTORY, count, metadata)));
     TEST_ASSERT_EQUAL_UINT8(1, count);
     TEST_ASSERT_TRUE(history[0].capturedSquare == move.to);
+    TEST_ASSERT_TRUE(history[0].movedPiece == original.movedPiece);
+    metadata.participants = makeParticipants();
+    uint8_t migrated[ChessStorageCodec::MAX_ENCODED_BYTES];
+    size_t migratedSize = 0;
+    TEST_ASSERT_TRUE(ChessStorageCodec::encode(decoded, history, count,
+        metadata, migrated, sizeof(migrated), migratedSize));
     decoded.unmakeMove(history[0]);
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(PieceType::Pawn),
         static_cast<uint8_t>(decoded.at(4, 1).type));
@@ -795,7 +817,7 @@ void test_v1_ordinary_non_capture_uses_destination_capture_square() {
 }
 
 void test_future_chess_version_and_fuzz_lengths_are_safe() {
-    uint8_t future[1] = {7};
+    uint8_t future[1] = {ChessStorageCodec::CURRENT_VERSION + 1};
     ChessBoard output;
     MoveRecord history[ChessStorageCodec::MAX_SAVED_HISTORY];
     uint8_t count = 42;
@@ -846,11 +868,11 @@ int main(int, char**) {
     RUN_TEST(test_profile_decode_preserves_output_on_corrupt_and_future_data);
     RUN_TEST(test_pending_result_codec_round_trip_crc_and_validation);
     RUN_TEST(test_crc_valid_nonterminated_fixed_names_are_rejected);
-    RUN_TEST(test_chess_v6_round_trip_embeds_participants);
-    RUN_TEST(test_chess_v6_rejects_every_truncation_and_trailing_data);
-    RUN_TEST(test_chess_v6_rejects_bad_crc_semantics_and_chess960_index);
-    RUN_TEST(test_chess_v6_rejects_invalid_fields_and_records);
-    RUN_TEST(test_overflow_requires_full_legal_prefix_and_later_final_board);
+    RUN_TEST(test_chess_current_round_trip_embeds_participants);
+    RUN_TEST(test_chess_current_rejects_every_truncation_and_trailing_data);
+    RUN_TEST(test_chess_current_rejects_bad_crc_semantics_and_chess960_index);
+    RUN_TEST(test_chess_current_rejects_invalid_fields_and_records);
+    RUN_TEST(test_overflow_validates_recent_history_and_migrates_legacy_prefix);
     RUN_TEST(test_golden_v2_through_v5_records_decode_exactly);
     RUN_TEST(test_v4_rejects_causally_inconsistent_history);
     RUN_TEST(test_v1_castling_reconstructs_moved_king_for_review_undo);

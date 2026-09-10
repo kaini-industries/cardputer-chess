@@ -2,56 +2,510 @@ name: Build and Release Firmware
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-  release:
-    types: [created, edited]
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag to upload artifacts to (e.g. v0.13.0)'
+      release_tag:
+        description: Existing tag to build (for example, v0.20.0)
         required: true
+        type: string
+      release_channel:
+        description: Optionally attach the verified assets to a non-final GitHub release
+        required: true
+        default: ci-only
+        type: choice
+        options:
+          - ci-only
+          - draft
+          - prerelease
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  PLATFORMIO_CORE_VERSION: 6.1.18
+  APP_PARTITION_SIZE: "3145728"
+  FLASH_SIZE: "8388608"
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
+    name: Test, build, and verify Cardputer Advance artifacts
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      stage_dir: ${{ steps.version.outputs.stage_dir }}
+      version: ${{ steps.version.outputs.version }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+
+      - name: Resolve and validate version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+            echo "ERROR: checkout is not clean" >&2
+            git status --short >&2
+            exit 1
+          fi
+
+          version="$({
+            awk '
+              /^\[env:cardputer-adv\][[:space:]]*$/ { in_target = 1; next }
+              /^\[/ { in_target = 0 }
+              in_target && /^[[:space:]]*custom_firmware_version[[:space:]]*=/ {
+                sub(/^[^=]*=[[:space:]]*/, "")
+                sub(/[[:space:]]*([;#].*)?$/, "")
+                print
+                exit
+              }
+            ' platformio.ini
+          } )"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "ERROR: invalid or missing custom_firmware_version: '$version'" >&2
+            exit 1
+          fi
+
+          release_tag="v${version}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ ! "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+              echo "ERROR: release_tag must be a v-prefixed semantic version" >&2
+              exit 1
+            fi
+            if [[ "${REQUESTED_TAG#v}" != "$version" ]]; then
+              echo "ERROR: tag '$REQUESTED_TAG' does not match firmware version '$version'" >&2
+              exit 1
+            fi
+
+            tag_commit="$(git rev-parse "refs/tags/${REQUESTED_TAG}^{commit}")"
+            head_commit="$(git rev-parse HEAD)"
+            if [[ "$tag_commit" != "$head_commit" ]]; then
+              echo "ERROR: checkout HEAD does not match tag '$REQUESTED_TAG'" >&2
+              exit 1
+            fi
+            release_tag="$REQUESTED_TAG"
+          fi
+
+          stage_dir="release/cardputer-chess-${version}"
+          artifact_name="cardputer-chess-${version}-cardputer-advance"
+          {
+            echo "artifact_name=$artifact_name"
+            echo "release_tag=$release_tag"
+            echo "stage_dir=$stage_dir"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install PlatformIO
-        run: pip install platformio
-
-      - name: Validate chess behavior
-        run: pio test -e native
-
-      - name: Build firmware
-        run: pio run -e cardputer-adv
-
-      - name: Check firmware size
+      - name: Install pinned PlatformIO Core
         run: |
-          MERGED_BIN=$(ls firmware/cardputer-chess-*-m5-burner.bin 2>/dev/null | head -1)
-          if [ -z "$MERGED_BIN" ]; then
-            echo "ERROR: Merged binary not found"
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "platformio==${PLATFORMIO_CORE_VERSION}"
+          pio --version
+
+      - name: Validate native chess behavior
+        run: |
+          set -euo pipefail
+          pio test -e native
+
+      - name: Validate engine and scene regressions with sanitizers
+        env:
+          CXX: g++
+        run: |
+          set -euo pipefail
+          python3 test/host_regressions/run.py
+
+      - name: Build Cardputer Advance firmware from clean state
+        run: |
+          set -euo pipefail
+          pio run -e cardputer-adv -t clean
+          pio run -e cardputer-adv
+
+      - name: Verify release artifact set and checksums
+        env:
+          STAGE_DIR: ${{ steps.version.outputs.stage_dir }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          expected=(
+            "SHA256SUMS"
+            "cardputer-chess-${VERSION}-app.bin"
+            "cardputer-chess-${VERSION}-cardputer-advance-flash-bundle.zip"
+            "cardputer-chess-${VERSION}-debug.zip"
+            "cardputer-chess-${VERSION}-m5-burner.bin"
+            "firmware.bin"
+            "release-manifest.json"
+          )
+
+          [[ -d "$STAGE_DIR" ]] || {
+            echo "ERROR: release staging directory '$STAGE_DIR' was not generated" >&2
             exit 1
-          fi
-          SIZE=$(stat --format=%s "$MERGED_BIN")
-          MAX=$((8 * 1024 * 1024))
-          echo "Merged binary size: $SIZE bytes (limit: $MAX bytes)"
-          if [ "$SIZE" -gt "$MAX" ]; then
-            echo "ERROR: Firmware exceeds 8MB flash size"
+          }
+
+          for filename in "${expected[@]}"; do
+            [[ -s "$STAGE_DIR/$filename" ]] || {
+              echo "ERROR: missing or empty release artifact '$STAGE_DIR/$filename'" >&2
+              exit 1
+            }
+          done
+
+          mapfile -t actual < <(
+            find "$STAGE_DIR" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort
+          )
+          mapfile -t expected_sorted < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          if [[ "${actual[*]}" != "${expected_sorted[*]}" ]]; then
+            echo "ERROR: staged release files differ from the exact expected set" >&2
+            printf 'Expected: %s\n' "${expected_sorted[*]}" >&2
+            printf 'Actual:   %s\n' "${actual[*]}" >&2
             exit 1
           fi
 
-      - name: Upload firmware to release
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
+          (
+            cd "$STAGE_DIR"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+          cmp --silent \
+            "$STAGE_DIR/cardputer-chess-${VERSION}-app.bin" \
+            "$STAGE_DIR/firmware.bin" || {
+              echo "ERROR: firmware.bin is not identical to the versioned app image" >&2
+              exit 1
+            }
+
+      - name: Verify manifest, partition limits, and merged flash layout
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+          STAGE_DIR: ${{ steps.version.outputs.stage_dir }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          export CHECKED_OUT_COMMIT
+          CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import zipfile
+
+          version = os.environ["VERSION"]
+          stage = Path(os.environ["STAGE_DIR"])
+          checked_out_commit = os.environ["CHECKED_OUT_COMMIT"]
+          app_limit = int(os.environ["APP_PARTITION_SIZE"])
+          flash_limit = int(os.environ["FLASH_SIZE"])
+
+          app_name = f"cardputer-chess-{version}-app.bin"
+          merged_name = f"cardputer-chess-{version}-m5-burner.bin"
+          flash_bundle_name = (
+              f"cardputer-chess-{version}-cardputer-advance-flash-bundle.zip"
+          )
+          debug_bundle_name = f"cardputer-chess-{version}-debug.zip"
+          publishable = {
+              app_name,
+              merged_name,
+              "firmware.bin",
+              flash_bundle_name,
+              debug_bundle_name,
+          }
+
+          def fail(message):
+              raise SystemExit(f"ERROR: {message}")
+
+          def sha256(data):
+              return hashlib.sha256(data).hexdigest()
+
+          def file_sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          app_size = (stage / app_name).stat().st_size
+          if app_size >= app_limit:
+              fail(
+                  f"app image is {app_size} bytes; it must be smaller than "
+                  f"the 0x300000-byte app partition"
+              )
+
+          merged_path = stage / merged_name
+          merged_size = merged_path.stat().st_size
+          if merged_size > flash_limit:
+              fail(
+                  f"merged image is {merged_size} bytes; 8 MB flash limit is "
+                  f"{flash_limit} bytes"
+              )
+
+          manifest_path = stage / "release-manifest.json"
+          try:
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+              fail(f"invalid release-manifest.json: {error}")
+
+          firmware = manifest.get("firmware", {})
+          target = manifest.get("target", {})
+          build = manifest.get("build", {})
+          flash = manifest.get("flash", {})
+          if manifest.get("schemaVersion") != 1:
+              fail("manifest schemaVersion must be 1")
+          if firmware.get("name") != "cardputer-chess":
+              fail("manifest firmware.name must be cardputer-chess")
+          if firmware.get("version") != version:
+              fail("manifest firmware.version does not match platformio.ini")
+          if firmware.get("tagCandidate") != f"v{version}":
+              fail("manifest tagCandidate does not match the firmware version")
+          if firmware.get("gitCommit") != checked_out_commit:
+              fail("manifest gitCommit does not match the checked-out commit")
+          if target.get("environment") != "cardputer-adv":
+              fail("manifest target.environment must be cardputer-adv")
+          if str(target.get("chip", "")).lower() != "esp32s3":
+              fail("manifest target.chip must be esp32s3")
+          if str(build.get("platformio", "")) != os.environ["PLATFORMIO_CORE_VERSION"]:
+              fail("manifest PlatformIO version does not match the pinned CI version")
+          if flash.get("sizeBytes") != flash_limit:
+              fail("manifest flash size must be 8 MB")
+          if str(flash.get("mode", "")).lower() != "dio":
+              fail("manifest flash mode must be dio")
+
+          release_artifacts = manifest.get("releaseArtifacts")
+          if not isinstance(release_artifacts, list):
+              fail("manifest releaseArtifacts must be an array")
+          by_name = {
+              item.get("file"): item
+              for item in release_artifacts
+              if isinstance(item, dict) and isinstance(item.get("file"), str)
+          }
+          if set(by_name) != publishable:
+              fail("manifest releaseArtifacts does not describe the exact asset set")
+          for filename, item in by_name.items():
+              path = stage / filename
+              if item.get("sizeBytes") != path.stat().st_size:
+                  fail(f"manifest size does not match {filename}")
+              if item.get("sha256") != file_sha256(path):
+                  fail(f"manifest SHA-256 does not match {filename}")
+
+          checksum_entries = {}
+          for line in (stage / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+              parts = line.split(maxsplit=1)
+              if len(parts) != 2:
+                  fail("malformed SHA256SUMS entry")
+              digest, filename = parts
+              filename = filename.lstrip("*")
+              if filename in checksum_entries:
+                  fail(f"duplicate SHA256SUMS entry for {filename}")
+              checksum_entries[filename] = digest
+          if set(checksum_entries) != publishable | {"release-manifest.json"}:
+              fail("SHA256SUMS must cover all assets and the manifest, but not itself")
+
+          images = flash.get("images")
+          if not isinstance(images, list):
+              fail("manifest flash.images must be an array")
+          expected_offsets = {0x0000, 0x8000, 0xE000, 0x10000}
+          offsets = {item.get("offset") for item in images if isinstance(item, dict)}
+          if offsets != expected_offsets or len(images) != len(expected_offsets):
+              fail(
+                  "manifest must contain exactly the bootloader, partitions, "
+                  "boot_app0, and application flash offsets"
+              )
+
+          bundle_path = stage / flash_bundle_name
+          try:
+              with zipfile.ZipFile(bundle_path) as archive:
+                  corrupt_member = archive.testzip()
+                  if corrupt_member is not None:
+                      fail(f"corrupt flash bundle member: {corrupt_member}")
+                  members = archive.namelist()
+                  if any(
+                      PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts
+                      for name in members
+                  ):
+                      fail("flash bundle contains an unsafe path")
+                  by_basename = {}
+                  for name in members:
+                      basename = PurePosixPath(name).name
+                      if basename:
+                          if basename in by_basename:
+                              fail(f"duplicate flash bundle basename: {basename}")
+                          by_basename[basename] = name
+
+                  merged = merged_path.read_bytes()
+                  for image in images:
+                      filename = image.get("file")
+                      offset = image.get("offset")
+                      if not isinstance(filename, str) or filename not in by_basename:
+                          fail(f"flash component is missing from bundle: {filename}")
+                      data = archive.read(by_basename[filename])
+                      if image.get("sizeBytes") != len(data):
+                          fail(f"manifest size does not match flash component {filename}")
+                      if image.get("sha256") != sha256(data):
+                          fail(f"manifest SHA-256 does not match flash component {filename}")
+                      if offset + len(data) > flash_limit:
+                          fail(f"flash component exceeds 8 MB layout: {filename}")
+                      if merged[offset : offset + len(data)] != data:
+                          fail(
+                              f"merged image bytes do not match {filename} at "
+                              f"0x{offset:X}"
+                          )
+          except (OSError, zipfile.BadZipFile) as error:
+              fail(f"invalid flash bundle: {error}")
+
+          try:
+              with zipfile.ZipFile(stage / debug_bundle_name) as archive:
+                  corrupt_member = archive.testzip()
+                  if corrupt_member is not None:
+                      fail(f"corrupt debug bundle member: {corrupt_member}")
+                  suffixes = {PurePosixPath(name).suffix for name in archive.namelist()}
+                  if ".elf" not in suffixes or ".map" not in suffixes:
+                      fail("debug bundle must contain both ELF and map files")
+          except (OSError, zipfile.BadZipFile) as error:
+              fail(f"invalid debug bundle: {error}")
+
+          print(
+              f"Verified Cardputer Advance release {version}: "
+              f"app={app_size} bytes, merged={merged_size} bytes"
+          )
+          PY
+
+      - name: Validate ESP32-S3 application image
+        env:
+          STAGE_DIR: ${{ steps.version.outputs.stage_dir }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          esptool="$HOME/.platformio/packages/tool-esptoolpy/esptool.py"
+          [[ -f "$esptool" ]] || {
+            echo "ERROR: PlatformIO esptool was not found at '$esptool'" >&2
+            exit 1
+          }
+          python "$esptool" --chip esp32s3 image_info \
+            "$STAGE_DIR/cardputer-chess-${VERSION}-app.bin"
+
+      - name: Upload verified CI artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ inputs.tag || github.event.release.tag_name }}
-          files: |
-            firmware/cardputer-chess-*.bin
-            bin/cardputer-adv/firmware.bin
+          name: ${{ steps.version.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ steps.version.outputs.stage_dir }}/cardputer-chess-${{ steps.version.outputs.version }}-m5-burner.bin
+            ${{ steps.version.outputs.stage_dir }}/cardputer-chess-${{ steps.version.outputs.version }}-app.bin
+            ${{ steps.version.outputs.stage_dir }}/firmware.bin
+            ${{ steps.version.outputs.stage_dir }}/cardputer-chess-${{ steps.version.outputs.version }}-cardputer-advance-flash-bundle.zip
+            ${{ steps.version.outputs.stage_dir }}/cardputer-chess-${{ steps.version.outputs.version }}-debug.zip
+            ${{ steps.version.outputs.stage_dir }}/release-manifest.json
+            ${{ steps.version.outputs.stage_dir }}/SHA256SUMS
+
+  attach-release-assets:
+    name: Attach verified assets to a non-final GitHub release
+    if: github.event_name == 'workflow_dispatch' && inputs.release_channel != 'ci-only'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified CI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ${{ needs.build.outputs.stage_dir }}
+
+      - name: Recheck downloaded checksums
+        env:
+          STAGE_DIR: ${{ needs.build.outputs.stage_dir }}
+        run: |
+          set -euo pipefail
+          (
+            cd "$STAGE_DIR"
+            sha256sum --check --strict SHA256SUMS
+          )
+
+      - name: Create or verify non-final release and attach exact assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          STAGE_DIR: ${{ needs.build.outputs.stage_dir }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_json="$RUNNER_TEMP/release.json"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > "$release_json" 2>/dev/null; then
+            is_draft="$(jq -r '.draft' "$release_json")"
+            is_prerelease="$(jq -r '.prerelease' "$release_json")"
+            if [[ "$RELEASE_CHANNEL" == "draft" && "$is_draft" != "true" ]]; then
+              echo "ERROR: '$RELEASE_TAG' already has a release that is not a draft" >&2
+              exit 1
+            fi
+            if [[ "$RELEASE_CHANNEL" == "prerelease" && "$is_prerelease" != "true" ]]; then
+              echo "ERROR: '$RELEASE_TAG' already has a release that is not a prerelease" >&2
+              exit 1
+            fi
+          else
+            notes="$RUNNER_TEMP/release-notes.md"
+            printf '%s\n' \
+              "Cardputer Advance firmware artifacts built and verified by GitHub Actions." \
+              "Review the generated manifest, checksums, and hardware test results before promoting this release." \
+              > "$notes"
+            if [[ "$RELEASE_CHANNEL" == "draft" ]]; then
+              gh release create "$RELEASE_TAG" \
+                --verify-tag \
+                --draft \
+                --title "$RELEASE_TAG" \
+                --notes-file "$notes"
+            elif [[ "$RELEASE_CHANNEL" == "prerelease" ]]; then
+              gh release create "$RELEASE_TAG" \
+                --verify-tag \
+                --prerelease \
+                --title "$RELEASE_TAG" \
+                --notes-file "$notes"
+            else
+              echo "ERROR: unsupported release channel '$RELEASE_CHANNEL'" >&2
+              exit 1
+            fi
+          fi
+
+          assets=(
+            "$STAGE_DIR/cardputer-chess-${VERSION}-m5-burner.bin"
+            "$STAGE_DIR/cardputer-chess-${VERSION}-app.bin"
+            "$STAGE_DIR/firmware.bin"
+            "$STAGE_DIR/cardputer-chess-${VERSION}-cardputer-advance-flash-bundle.zip"
+            "$STAGE_DIR/cardputer-chess-${VERSION}-debug.zip"
+            "$STAGE_DIR/release-manifest.json"
+            "$STAGE_DIR/SHA256SUMS"
+          )
+          gh release upload "$RELEASE_TAG" "${assets[@]}"
+
+          echo "Verified assets attached to the $RELEASE_CHANNEL release for $RELEASE_TAG."
+          echo "This workflow does not promote it to a final release."

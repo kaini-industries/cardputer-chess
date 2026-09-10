@@ -12,10 +12,10 @@ static constexpr size_t HEADER_SIZE_V1 = 78;
 static constexpr size_t HEADER_SIZE_V2 = 79;
 static constexpr size_t HEADER_SIZE_V3 = 91;
 static constexpr size_t HEADER_SIZE_V4_V5 = 91;
-static constexpr size_t HEADER_SIZE_V6 = 131;
+static constexpr size_t HEADER_SIZE_V6_V7 = 131;
 static constexpr size_t RECORD_SIZE_V1 = 14;
 static constexpr size_t RECORD_SIZE_V2_V3 = 33;
-static constexpr size_t RECORD_SIZE_V4_V6 = 16;
+static constexpr size_t RECORD_SIZE_V4_V7 = 16;
 
 uint32_t crc32(const uint8_t* data, size_t length) {
     uint32_t crc = 0xFFFFFFFFu;
@@ -217,9 +217,11 @@ bool validateHistoryCausally(const ChessBoard& finalBoard,
                              const MoveRecord* history,
                              uint8_t historyCount, bool historyOverflow,
                              ChessVariant variant, uint16_t positionIndex,
-                             uint8_t sourceVersion) {
+                             uint8_t sourceVersion,
+                             MoveRecord* normalizedHistory = nullptr) {
     if ((historyCount != 0 && !history) ||
-        (historyOverflow && historyCount != MAX_SAVED_HISTORY)) {
+        (historyOverflow && sourceVersion < 7 &&
+         historyCount != MAX_SAVED_HISTORY)) {
         return false;
     }
 
@@ -227,6 +229,21 @@ bool validateHistoryCausally(const ChessBoard& finalBoard,
     replay.setVariant(variant);
     replay.setPositionIndex(positionIndex);
     replay.reset();
+    const uint32_t finalPly =
+        (static_cast<uint32_t>(finalBoard.fullmoveNumber()) - 1u) * 2u +
+        (finalBoard.sideToMove() == PieceColor::Black ? 1u : 0u);
+    if (historyOverflow && sourceVersion >= 7) {
+        // v7 retains the most recent plies. Legacy overflow saves contain a
+        // prefix instead; they are validated separately below before migration.
+        if (finalPly <= MAX_SAVED_HISTORY || finalPly <= historyCount) return false;
+        replay = finalBoard;
+        for (int i = historyCount - 1; i >= 0; --i) replay.unmakeMove(history[i]);
+        SaveMetadata positionMetadata;
+        positionMetadata.variant = variant;
+        positionMetadata.positionIndex = positionIndex;
+        if (!validBoard(replay, positionMetadata) ||
+            ChessRules::isInCheck(replay, opponent(replay.sideToMove()))) return false;
+    }
     for (uint8_t i = 0; i < historyCount; ++i) {
         MoveList legalMoves;
         ChessRules::generateLegal(replay, legalMoves);
@@ -243,18 +260,18 @@ bool validateHistoryCausally(const ChessBoard& finalBoard,
         if (!recordsEqualForVersion(history[i], generated, sourceVersion)) {
             return false;
         }
+        // v1 omitted movedPiece. Materialize the complete, validated record so
+        // that undo, repetition, and migration can use it immediately.
+        if (normalizedHistory) normalizedHistory[i] = generated;
     }
 
-    if (!historyOverflow) return boardsEqual(replay, finalBoard);
+    if (!historyOverflow || sourceVersion >= 7) return boardsEqual(replay, finalBoard);
 
-    // The runtime retains the first 250 plies, then marks overflow on the next
+    // Legacy firmware retained the first 250 plies, then marked overflow on the next
     // legal move. Unknown suffix moves make full reconciliation impossible,
     // but the retained prefix must be legal and the final board must be later
     // than that prefix. Also reject positions where the player who just moved
     // illegally left their own king in check.
-    const uint32_t finalPly =
-        (static_cast<uint32_t>(finalBoard.fullmoveNumber()) - 1u) * 2u +
-        (finalBoard.sideToMove() == PieceColor::Black ? 1u : 0u);
     return finalPly > historyCount &&
            !ChessRules::isInCheck(
                finalBoard, opponent(finalBoard.sideToMove()));
@@ -303,7 +320,8 @@ bool unpackRecord(const uint8_t* source, uint8_t version,
                record.move.from.row == record.move.to.row &&
                (record.move.from.row == 0 || record.move.from.row == 7) &&
                (record.move.to.col == 2 || record.move.to.col == 6)) {
-        // v1 omitted movedPiece. Only castling unmake consumes this field.
+        // v1 omitted movedPiece. Castling needs this field during validation;
+        // other records are completed by replay before returning decoded history.
         record.movedPiece = makePiece(
             PieceType::King,
             record.move.from.row == 0 ? PieceColor::White : PieceColor::Black);
@@ -330,16 +348,17 @@ bool versionLayout(uint8_t version, size_t& headerSize, size_t& recordSize,
             return true;
         case 4:
             headerSize = HEADER_SIZE_V4_V5;
-            recordSize = RECORD_SIZE_V4_V6;
+            recordSize = RECORD_SIZE_V4_V7;
             return true;
         case 5:
             headerSize = HEADER_SIZE_V4_V5;
-            recordSize = RECORD_SIZE_V4_V6;
+            recordSize = RECORD_SIZE_V4_V7;
             checksumSize = 1;
             return true;
         case 6:
-            headerSize = HEADER_SIZE_V6;
-            recordSize = RECORD_SIZE_V4_V6;
+        case 7:
+            headerSize = HEADER_SIZE_V6_V7;
+            recordSize = RECORD_SIZE_V4_V7;
             checksumSize = 4;
             return true;
         default:
@@ -351,8 +370,8 @@ bool versionLayout(uint8_t version, size_t& headerSize, size_t& recordSize,
 
 size_t encodedSize(uint8_t historyCount) {
     if (historyCount > MAX_SAVED_HISTORY) return 0;
-    return HEADER_SIZE_V6 + static_cast<size_t>(historyCount) *
-           RECORD_SIZE_V4_V6 + 4;
+    return HEADER_SIZE_V6_V7 + static_cast<size_t>(historyCount) *
+           RECORD_SIZE_V4_V7 + 4;
 }
 
 bool encode(const ChessBoard& board,
@@ -404,7 +423,7 @@ bool encode(const ChessBoard& board,
     writeU32LE(buffer + 86, metadata.timeBlackMs);
     buffer[90] = metadata.timerRunning ? 1 : 0;
 
-    buffer[91] = 1; // Embedded participants are mandatory in v6.
+    buffer[91] = 1; // Embedded participants are mandatory since v6.
     writeU32LE(buffer + 92, metadata.participants.gameId);
     buffer[96] = static_cast<uint8_t>(metadata.participants.mode);
     writeU32LE(buffer + 97, metadata.participants.whiteProfileId);
@@ -415,8 +434,8 @@ bool encode(const ChessBoard& board,
                 PLAYER_NAME_MAX + 1);
 
     for (uint8_t i = 0; i < historyCount; ++i) {
-        packRecord(buffer + HEADER_SIZE_V6 +
-                   static_cast<size_t>(i) * RECORD_SIZE_V4_V6, history[i]);
+        packRecord(buffer + HEADER_SIZE_V6_V7 +
+                   static_cast<size_t>(i) * RECORD_SIZE_V4_V7, history[i]);
     }
     writeU32LE(buffer + required - 4, crc32(buffer, required - 4));
     bytesWritten = required;
@@ -454,7 +473,7 @@ DecodeStatus decode(const uint8_t* buffer, size_t size,
         uint8_t checksum = 0;
         for (size_t i = 0; i < size - 1; ++i) checksum ^= buffer[i];
         if (checksum != buffer[size - 1]) return DecodeStatus::Corrupt;
-    } else if (version == 6 &&
+    } else if (version >= 6 &&
                readU32LE(buffer + size - 4) != crc32(buffer, size - 4)) {
         return DecodeStatus::Corrupt;
     }
@@ -512,7 +531,7 @@ DecodeStatus decode(const uint8_t* buffer, size_t size,
         decodedMetadata.timerRunning = buffer[90] != 0;
     }
 
-    if (version == 6) {
+    if (version >= 6) {
         if (buffer[91] != 1 || buffer[96] >
                 static_cast<uint8_t>(GameMode::AI)) {
             return DecodeStatus::Corrupt;
@@ -590,19 +609,24 @@ DecodeStatus decode(const uint8_t* buffer, size_t size,
     if (!validateHistoryCausally(
             decodedBoard, decodedHistory, decodedHistoryCount,
             decodedMetadata.historyOverflow, decodedVariant,
-            decodedPositionIndex, version)) {
+            decodedPositionIndex, version, decodedHistory)) {
         delete[] decodedHistory;
         return DecodeStatus::Corrupt;
     }
 
+    // The unknown suffix of old overflow saves cannot be recovered from a
+    // retained prefix. Start tracking fresh at this board, never replay that
+    // prefix backward against a different position.
+    const uint8_t retainedCount = decodedMetadata.historyOverflow && version < 7
+        ? 0 : decodedHistoryCount;
     board = decodedBoard;
-    if (decodedHistoryCount != 0) {
+    if (retainedCount != 0) {
         std::memcpy(history, decodedHistory,
-                    static_cast<size_t>(decodedHistoryCount) *
+                    static_cast<size_t>(retainedCount) *
                     sizeof(MoveRecord));
     }
     delete[] decodedHistory;
-    historyCount = decodedHistoryCount;
+    historyCount = retainedCount;
     metadata = decodedMetadata;
     return DecodeStatus::Ok;
 }

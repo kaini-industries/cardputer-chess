@@ -117,9 +117,9 @@ In multi-move puzzles (mate-in-2, tactics), the opponent's response is auto-play
 
 ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network setup needed. Both devices just need to be within WiFi range (~30m indoors). Pairing times out after 60 seconds.
 
-The host broadcasts a discovery message every 500ms. Joiners see the host's profile name, MAC suffix, variant, and time control. Pairing requests and game-start packets are retried until acknowledged. During play, protocol-v5 packets are bound to a nonzero game and session ID, filtered to the selected peer MAC, sequence checked, acknowledged, and protected against stale or divergent board state with position epochs and hashes. Clock heartbeats, draw responses, acknowledged time gifts, and terminal results also use session-scoped validation and retry handling.
+The host broadcasts a discovery message every 500ms. Joiners see the host's profile name, MAC suffix, variant, and time control. Pairing requests and game-start packets are retried until acknowledged. During play, protocol-v6 packets are bound to a nonzero game and session ID, filtered to the selected peer MAC, sequence checked, acknowledged, and protected against stale or divergent board state with position epochs and hashes. Clock heartbeats, draw responses, acknowledged time gifts, and terminal results also use session-scoped validation and retry handling.
 
-Both devices must run v0.20.0 or another protocol-v5 build; earlier multiplayer protocol versions are intentionally rejected.
+Both devices must run a protocol-v6 build with matching draw rules. Older protocol-v5 builds must be upgraded on both devices; earlier multiplayer protocol versions are intentionally rejected.
 
 ## Controls
 
@@ -187,10 +187,67 @@ The side-button **Esc** shortcut returns directly to the lobby from a game-over 
 
 ## Installation
 
+Release binaries target the **M5Stack Cardputer Advance with 8 MB flash**. A
+release build stages the files below in
+`release/cardputer-chess-0.20.0/`; the same files are attached to the GitHub
+release.
+
 ### M5 Burner (easiest)
 
 1. Open [M5Burner](https://docs.m5stack.com/en/download) and filter by **Cardputer**
 2. Find **Cardputer ADV Chess** and click **Burn**
+
+M5Burner performs a factory-style installation using
+`cardputer-chess-0.20.0-m5-burner.bin` at offset `0x0000`. Treat this as a
+clean install: an erase performed by M5Burner or before manual factory flashing
+removes saved games, profiles, results, puzzle progress, and settings.
+
+### Release Artifacts
+
+| File | Use |
+|------|-----|
+| `cardputer-chess-0.20.0-m5-burner.bin` | Complete factory image for M5Burner or manual flashing at `0x0000`. It contains the bootloader, partition table, OTA selector, and application. |
+| `cardputer-chess-0.20.0-app.bin` | Application-only update. Flash at `0x10000`; do not flash it at `0x0000`. It preserves NVS profiles, saved games, and other data when upgrading from a compatible partition layout. |
+| `firmware.bin` | Compatibility alias of the application-only image. It also belongs at `0x10000`, not `0x0000`. |
+| `cardputer-chess-0.20.0-cardputer-advance-flash-bundle.zip` | Advanced/manual recovery bundle containing the individual flash components, a flashing guide, and the versioned application image. |
+| `release-manifest.json` | Machine-readable version, source commit, target, protocol, flash layout, component sizes, build-tool versions, and SHA-256 hashes. |
+| `SHA256SUMS` | Checksums for verifying every downloadable release artifact. |
+| `cardputer-chess-0.20.0-debug.zip` | ELF and map files for crash diagnosis; this is not an installable firmware image. |
+
+Verify a download before flashing:
+
+```bash
+shasum -a 256 -c SHA256SUMS
+```
+
+The complete image and manual flash bundle use these Cardputer Advance offsets:
+
+| Offset | Component |
+|--------|-----------|
+| `0x0000` | `bootloader.bin` |
+| `0x8000` | `partitions.bin` |
+| `0xE000` | `boot_app0.bin` (initial OTA selector data) |
+| `0x10000` | `cardputer-chess-0.20.0-app.bin` |
+
+For a clean manual factory installation, erase the device and write the
+complete image at `0x0000`:
+
+```bash
+esptool.py --chip esp32s3 erase_flash
+esptool.py --chip esp32s3 write_flash --flash_mode dio --flash_size 8MB \
+  0x0000 cardputer-chess-0.20.0-m5-burner.bin
+```
+
+To update only the application while retaining compatible saved data, skip the
+erase and write the app image at `0x10000`:
+
+```bash
+esptool.py --chip esp32s3 write_flash --flash_mode dio --flash_size 8MB \
+  0x10000 cardputer-chess-0.20.0-app.bin
+```
+
+Do not exchange those offsets: a complete image only belongs at `0x0000`, and
+an app-only image only belongs at `0x10000`.
 
 ### Build from Source
 
@@ -207,9 +264,10 @@ pio run -e cardputer-adv --target upload
 pio device monitor
 ```
 
-The build generates `firmware/cardputer-chess-<version>-m5-burner.bin` for
-M5Burner and `firmware/cardputer-chess-<version>-app.bin` for launcher or manual
-flashing at offset `0x10000`.
+The build generates the complete, app-only, compatibility, flash-bundle,
+debug, manifest, and checksum artifacts described above. See
+[`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for the release and
+hardware-validation gates.
 
 ## Project Structure
 
@@ -236,7 +294,10 @@ flashing at offset `0x10000`.
 │   └── chess_sprites.h         # Auto-generated RGB565 piece sprites (from convert_sprites.py)
 ├── lib/
 │   └── cardgfx/                # CardGFX UI framework (see its README)
-├── firmware/                   # M5Burner merged binaries (build artifact)
+├── firmware/                   # Legacy/versioned firmware build artifacts
+├── release/                    # Clean, version-specific release staging
+├── docs/
+│   └── RELEASE_CHECKLIST.md    # Release and hardware validation gates
 ├── pixel_chess_16x16_icons/     # Source PNG sprite sheets
 ├── convert_sprites.py          # Pre-build script: PNG → RGB565 C header
 ├── post_build.py               # Post-build script (M5Burner binary, release staging)
@@ -252,8 +313,9 @@ flashing at offset `0x10000`.
 |---------|---------|---------|
 | [M5Unified](https://github.com/m5stack/M5Unified) | 0.2.10 | Unified hardware abstraction |
 | [M5Cardputer](https://github.com/m5stack/M5Cardputer) | 1.1.1 | Cardputer keyboard and hardware |
-| [M5GFX](https://github.com/m5stack/M5GFX) | 0.2.16 | Graphics library |
+| [M5GFX](https://github.com/m5stack/M5GFX) | 0.2.25 (pinned source commit) | Graphics library |
+| [IRremote](https://github.com/Arduino-IRremote/Arduino-IRremote) | 4.7.1 | Cardputer infrared dependency |
 
 ## License
 
-MIT
+[MIT](LICENSE)

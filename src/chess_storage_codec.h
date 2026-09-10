@@ -10,7 +10,7 @@
 namespace ChessStorageCodec {
 
 static constexpr uint8_t MAX_SAVED_HISTORY = 250;
-static constexpr uint8_t CURRENT_VERSION = 6;
+static constexpr uint8_t CURRENT_VERSION = 7;
 static constexpr size_t MAX_ENCODED_BYTES =
     131 + static_cast<size_t>(MAX_SAVED_HISTORY) * 16 + 4;
 // v2/v3 used 33-byte atomic-era records and are the largest legacy blobs.
@@ -50,7 +50,7 @@ bool encode(const ChessBoard& board,
             const SaveMetadata& metadata,
             uint8_t* buffer, size_t capacity, size_t& bytesWritten);
 
-// Decodes v1-v6. All outputs remain untouched unless Ok is returned.
+// Decodes v1-v7. v7 overflow history is a recent suffix, not a prefix. All outputs remain untouched unless Ok is returned.
 DecodeStatus decode(const uint8_t* buffer, size_t size,
                     ChessBoard& board,
                     MoveRecord* history, size_t historyCapacity,

@@ -36,6 +36,10 @@ namespace ChessRules {
     // Insufficient material (K vs K, K+B vs K, K+N vs K)
     bool isInsufficientMaterial(const ChessBoard& board);
 
+    // Material-based impossibility of mating, including enemy pieces that can
+    // block their own king. Does not attempt to solve arbitrary locked positions.
+    bool hasInsufficientMatingMaterial(const ChessBoard& board, PieceColor side);
+
     // Threefold repetition detection (walks history backward)
     bool isThreefoldRepetition(const ChessBoard& board, const MoveRecord* history, uint8_t historyCount);
 

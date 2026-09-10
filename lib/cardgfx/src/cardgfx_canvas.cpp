@@ -255,7 +255,7 @@ void Canvas::drawRect(int16_t x, int16_t y, uint16_t w, uint16_t h,
 }
 
 void Canvas::drawHLine(int16_t x, int16_t y, uint16_t len, uint16_t color) {
-    if (!m_buffer || y < 0 || y >= m_height) return;
+    if (!m_buffer || len == 0 || x >= m_width || y < 0 || y >= m_height) return;
     if (x < 0) { if ((uint16_t)(-x) >= len) return; len += x; x = 0; }
     if (x + len > m_width) len = m_width - x;
     if (len == 0) return;
@@ -266,7 +266,7 @@ void Canvas::drawHLine(int16_t x, int16_t y, uint16_t len, uint16_t color) {
 }
 
 void Canvas::drawVLine(int16_t x, int16_t y, uint16_t len, uint16_t color) {
-    if (!m_buffer || x < 0 || x >= m_width) return;
+    if (!m_buffer || len == 0 || y >= m_height || x < 0 || x >= m_width) return;
     if (y < 0) { if ((uint16_t)(-y) >= len) return; len += y; y = 0; }
     if (y + len > m_height) len = m_height - y;
     if (len == 0) return;
