@@ -127,6 +127,8 @@ private:
     bool m_puzzleAutoPlayPending = false;
     int32_t m_puzzleAutoPlayDelay = 0;
     uint8_t m_puzzleHintLevel = 0;
+    uint16_t m_puzzleRating = 0;
+    uint32_t m_puzzleFeedbackUntil = 0;
 
     // ── AI Mode ────────────────────────────────────────────────
     AIDifficulty m_aiDifficulty = AIDifficulty::None;
@@ -236,6 +238,8 @@ private:
                     uint32_t terminalTimestamp = 0);
     bool recordCompletedGame();
     void captureTerminalSummary();
+    GameOutcome timeoutOutcome(PieceColor flagged) const;
+    void finishTimeout(PieceColor flagged);
     void finishDeferredTimeoutIfReady();
     void showHelpModal();
     void closeActionModal();

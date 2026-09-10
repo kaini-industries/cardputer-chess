@@ -380,54 +380,44 @@ bool isDraw50Move(const ChessBoard& board) {
     return board.halfmoveClock() >= 100;
 }
 
-bool isInsufficientMaterial(const ChessBoard& board) {
-    uint8_t whiteKnights = 0, whiteBishops = 0;
-    uint8_t blackKnights = 0, blackBishops = 0;
-    uint8_t otherPieces = 0;
-    uint8_t bishopColorMask = 0; // bit 0 = light square bishop exists, bit 1 = dark
-
-    for (uint8_t r = 0; r < 8; r++) {
-        for (uint8_t c = 0; c < 8; c++) {
-            Piece p = board.at(c, r);
-            if (p.empty() || p.type == PieceType::King) continue;
-
-            if (p.type == PieceType::Knight) {
-                if (p.color == PieceColor::White) whiteKnights++;
-                else blackKnights++;
-            } else if (p.type == PieceType::Bishop) {
-                if (p.color == PieceColor::White) whiteBishops++;
-                else blackBishops++;
-                bishopColorMask |= (1 << ((c + r) & 1));
-            } else {
-                otherPieces++;
+bool hasInsufficientMatingMaterial(const ChessBoard& board, PieceColor side) {
+    unsigned knights = 0, bishops = 0, bishopColors = 0;
+    bool anyPawnOrKnight = false, enemyCanBlockKnightMate = false;
+    for (uint8_t r = 0; r < 8; ++r) {
+        for (uint8_t c = 0; c < 8; ++c) {
+            const Piece piece = board.at(c, r);
+            if (piece.empty() || piece.type == PieceType::King) continue;
+            if (piece.type == PieceType::Bishop) bishopColors |= 1u << ((c + r) & 1);
+            if (piece.type == PieceType::Pawn || piece.type == PieceType::Knight)
+                anyPawnOrKnight = true;
+            if (piece.color != side) {
+                if (piece.type != PieceType::Queen) enemyCanBlockKnightMate = true;
+                continue;
             }
+            if (piece.type == PieceType::Knight) ++knights;
+            else if (piece.type == PieceType::Bishop) ++bishops;
+            else return false; // Pawns can promote; rooks and queens can mate.
         }
     }
+    if (knights) return knights == 1 && bishops == 0 && !enemyCanBlockKnightMate;
+    if (bishops) return bishopColors != 3 && !anyPawnOrKnight;
+    return true; // Bare king.
+}
 
-    if (otherPieces > 0) return false;
-
-    uint8_t totalMinor = whiteKnights + whiteBishops + blackKnights + blackBishops;
-
-    // K vs K
-    if (totalMinor == 0) return true;
-    // K+B vs K or K+N vs K
-    if (totalMinor == 1) return true;
-    // K+B vs K+B — all bishops on same color square
-    if (totalMinor == 2 && whiteKnights == 0 && blackKnights == 0 &&
-        (bishopColorMask == 1 || bishopColorMask == 2)) return true;
-
-    return false;
+bool isInsufficientMaterial(const ChessBoard& board) {
+    return hasInsufficientMatingMaterial(board, PieceColor::White) &&
+           hasInsufficientMatingMaterial(board, PieceColor::Black);
 }
 
 bool isThreefoldRepetition(const ChessBoard& board, const MoveRecord* history, uint8_t historyCount) {
-    uint32_t currentHash = ChessZobrist::hash(board);
+    uint32_t currentHash = ChessZobrist::repetitionHash(board);
     uint8_t count = 1; // current position counts as one occurrence
 
     ChessBoard tempBoard = board;
 
     for (int i = (int)historyCount - 1; i >= 0; i--) {
         tempBoard.unmakeMove(history[i]);
-        uint32_t h = ChessZobrist::hash(tempBoard);
+        uint32_t h = ChessZobrist::repetitionHash(tempBoard);
         if (h == currentHash) {
             count++;
             if (count >= 3) return true;

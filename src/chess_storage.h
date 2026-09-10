@@ -23,7 +23,7 @@ struct LoadResult {
     uint32_t gameId = 0;
 };
 
-// Writes a CRC32-protected v6 record. Participants (including the gameId) are
+// Writes a CRC32-protected v7 record (recent history is retained after overflow). Participants (including the gameId) are
 // committed in the same NVS blob as the board. Both profile IDs may be zero,
 // but gameId and sanitized display names are required.
 bool saveGame(const ChessBoard& board,
@@ -36,7 +36,7 @@ bool saveGame(const ChessBoard& board,
               uint32_t timeBlackMs, bool timerRunning,
               const ActiveGameParticipants& participants);
 
-// Safely decodes v1-v6. All output arguments remain untouched on failure.
+// Safely decodes v1-v7. All output arguments remain untouched on failure.
 // participants.valid is false for v1-v5 because their separate active_meta
 // record cannot be proven to belong to the board save.
 LoadResult loadGame(ChessBoard& board,
@@ -57,7 +57,7 @@ LoadResult probe();
 bool hasSave();
 
 // Idempotent erase. clearIfGameId refuses to delete a legacy, corrupt, future,
-// or different v6 game.
+// or a different game.
 bool clearSave();
 bool clearIfGameId(uint32_t expectedGameId);
 

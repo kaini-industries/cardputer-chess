@@ -1,4 +1,5 @@
 #include "chess_zobrist.h"
+#include "chess_rules.h"
 
 // Deterministic 32-bit random numbers for Zobrist hashing.
 // Generated from LFSR with seed 0x12345678.
@@ -71,6 +72,31 @@ uint32_t hash(const ChessBoard& board) {
     }
 
     return h;
+}
+
+uint32_t repetitionHash(const ChessBoard& board) {
+    uint32_t h = hash(board);
+    const Square ep = board.enPassantTarget();
+    if (isNoSquare(ep)) return h;
+
+    const PieceColor side = board.sideToMove();
+    const int row = ep.row + (side == PieceColor::White ? -1 : 1);
+    if (row >= 0 && row < 8 && board.at(ep.col, ep.row).empty() &&
+        board.at(ep.col, row) == Piece(PieceType::Pawn, opponent(side))) {
+        for (int dc = -1; dc <= 1; dc += 2) {
+            const int col = ep.col + dc;
+            if (col < 0 || col >= 8 ||
+                board.at(col, row) != Piece(PieceType::Pawn, side)) continue;
+            ChessBoard candidate = board;
+            Move move;
+            move.from = makeSquare(col, row);
+            move.to = ep;
+            move.isEnPassant = true;
+            candidate.makeMove(move);
+            if (!ChessRules::isInCheck(candidate, side)) return h;
+        }
+    }
+    return h ^ s_epFileTable[ep.col];
 }
 
 } // namespace ChessZobrist

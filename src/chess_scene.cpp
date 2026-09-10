@@ -1,4 +1,5 @@
 #include "chess_scene.h"
+#include "chess_storage_codec.h"
 #include "chess_rules.h"
 #include "chess_sprites.h"
 #include "chess_zobrist.h"
@@ -267,13 +268,7 @@ void ChessScene::onTick(uint32_t dt_ms) {
                         m_statusBar.setRight("Confirming +15 sec");
                     }
                 } else {
-                    const GameOutcome outcome =
-                        flagged == PieceColor::White
-                            ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
-                    const char* winner = flagged == PieceColor::White
-                        ? "Black wins!" : "White wins!";
-                    finishGame(outcome, TerminationReason::Timeout,
-                               "Time's Up!", winner, true);
+                    finishTimeout(flagged);
                 }
             }
         }
@@ -296,7 +291,9 @@ void ChessScene::onTick(uint32_t dt_ms) {
         m_puzzleAutoPlayDelay -= (int32_t)dt_ms;
         if (m_puzzleAutoPlayDelay <= 0) {
             m_puzzleAutoPlayPending = false;
-            if (m_puzzleSolutionStep < m_puzzleSolutionLen) {
+            if (m_uiState != UIState::GameOver &&
+                m_puzzleSolutionStep < m_puzzleSolutionLen &&
+                (m_puzzleSolutionStep & 1)) {
                 Move responseMove = m_puzzleSolution[m_puzzleSolutionStep];
                 // Find the full legal move with flags
                 MoveList legal;
@@ -304,7 +301,8 @@ void ChessScene::onTick(uint32_t dt_ms) {
                 bool matched = false;
                 for (uint8_t i = 0; i < legal.count; i++) {
                     if (legal.moves[i].from == responseMove.from &&
-                        legal.moves[i].to == responseMove.to) {
+                        legal.moves[i].to == responseMove.to &&
+                        legal.moves[i].promotion == responseMove.promotion) {
                         responseMove = legal.moves[i];
                         matched = true;
                         break;
@@ -729,7 +727,11 @@ void ChessScene::newGame() {
 }
 
 void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
-    if (m_uiState == UIState::GameOver || m_uiState == UIState::PromotionPending) {
+    // Grid handles Enter before Scene::onInput(), so guard actions here too.
+    if (m_moveAnim.active || m_actionModal.isVisible() ||
+        m_exitModal.isVisible() || m_gameOverModal.isVisible() ||
+        m_uiState == UIState::GameOver || m_uiState == UIState::PromotionPending ||
+        (m_puzzleMode && (m_puzzleAutoPlayPending || (m_puzzleSolutionStep & 1)))) {
         return;
     }
 
@@ -769,6 +771,7 @@ void ChessScene::onCellAction(uint8_t gridCol, uint8_t gridRow) {
 }
 
 void ChessScene::selectPiece(uint8_t col, uint8_t boardRow) {
+    if (m_puzzleMode && (m_puzzleAutoPlayPending || (m_puzzleSolutionStep & 1))) return;
     if (localMoveBlockedByControl()) {
         m_statusBar.setRight("Action confirming");
         return;
@@ -814,22 +817,46 @@ void ChessScene::tryMove(uint8_t col, uint8_t boardRow) {
     Move baseMove;
     bool isPromotion = false;
     bool found = false;
+    Move castleMove;
+    bool hasCastle = false, hasKingMove = false;
 
     for (uint8_t i = 0; i < m_legalMoves.count; i++) {
         if (m_legalMoves.moves[i].to.col == col &&
             m_legalMoves.moves[i].to.row == boardRow) {
-            baseMove = m_legalMoves.moves[i];
-            if (baseMove.promotion != PieceType::None) {
-                isPromotion = true;
+            const Move& candidate = m_legalMoves.moves[i];
+            if (!found || !candidate.isCastle) baseMove = candidate;
+            if (candidate.isCastle) {
+                castleMove = candidate;
+                hasCastle = true;
+            } else if (m_board.at(candidate.from.col, candidate.from.row).type == PieceType::King) {
+                hasKingMove = true;
             }
+            isPromotion = candidate.promotion != PieceType::None;
             found = true;
-            break;
         }
     }
 
     if (!found) return;
 
-    if (isPromotion) {
+    if (hasCastle && hasKingMove) {
+        // Chess960 can give an ordinary king move and castling identical
+        // coordinates. Preserve access to both with an explicit choice.
+        m_actionModal.clearButtons();
+        m_actionModal.setTitle("Choose move");
+        m_actionModal.setMessage("Move king or castle?");
+        m_actionModal.setEscapeCallback([this]() { closeActionModal(); });
+        m_actionModal.addButton("King", [this, baseMove]() {
+            closeActionModal();
+            executeMove(baseMove);
+        });
+        m_actionModal.addButton("Castle", [this, castleMove]() {
+            closeActionModal();
+            executeMove(castleMove);
+        });
+        m_actionModal.addButton("Cancel", [this]() { closeActionModal(); });
+        m_actionModal.show();
+        focusChain().focusWidget(&m_actionModal);
+    } else if (isPromotion) {
         showPromotionModal(baseMove);
     } else {
         executeMove(baseMove);
@@ -858,13 +885,7 @@ void ChessScene::executeMove(const Move& move) {
                     onConnectionLost("Clock out of sync");
                     return;
                 }
-                const GameOutcome outcome = flagged == PieceColor::White
-                    ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
-                finishGame(outcome, TerminationReason::Timeout,
-                           "Time's Up!",
-                           flagged == PieceColor::White
-                               ? "Black wins!" : "White wins!",
-                           true);
+                finishTimeout(flagged);
             }
             return;
         }
@@ -890,13 +911,12 @@ void ChessScene::executeMove(const Move& move) {
     m_moveAnim.active = true;
 
     // Store history for undo
-    if (m_historyCount < MAX_HISTORY) {
-        m_history[m_historyCount] = m_board.makeMove(move);
-        m_historyCount++;
-    } else {
-        m_board.makeMove(move);
-        m_historyOverflow = true; // Can no longer undo safely
+    if (m_historyCount == MAX_HISTORY) {
+        std::memmove(m_history, m_history + 1, (MAX_HISTORY - 1) * sizeof(MoveRecord));
+        --m_historyCount;
+        m_historyOverflow = true; // Full-game undo/review is no longer available.
     }
+    m_history[m_historyCount++] = m_board.makeMove(move);
     ++m_positionEpoch;
     const uint32_t postBoardHash = ChessZobrist::hash(m_board);
 
@@ -931,7 +951,8 @@ void ChessScene::executeMove(const Move& move) {
 
     // Update UI
     deselectPiece();
-    addMoveToList(sanBuf);
+    if (m_historyOverflow) rebuildMoveList();
+    else addMoveToList(sanBuf);
     updateStatusBar();
     updateBoardHighlights();
 
@@ -965,6 +986,8 @@ void ChessScene::executeMove(const Move& move) {
             // Correct move
             m_puzzleSolutionStep++;
             m_puzzleHintLevel = 0;
+            m_puzzleFeedbackUntil = 0;
+            m_puzzleAutoPlayPending = false;
 
             if (m_puzzleSolutionStep >= m_puzzleSolutionLen) {
                 // Puzzle solved!
@@ -1019,6 +1042,7 @@ void ChessScene::executeMove(const Move& move) {
         
             rebuildMoveList();
             m_puzzleHintLevel = 0;
+            m_puzzleFeedbackUntil = millis() + 1500;
             m_statusBar.setRight("Try again");
             m_uiState = UIState::SelectPiece;
             deselectPiece();
@@ -1099,6 +1123,21 @@ void ChessScene::undoLastMove() {
 }
 
 void ChessScene::updateStatusBar() {
+    if (m_puzzleMode) {
+        const char* type = m_puzzleType == PuzzleType::MateIn1 ? "Mate in 1"
+            : m_puzzleType == PuzzleType::MateIn2 ? "Mate in 2" : "Tactic";
+        m_statusBar.setLeft(type);
+        char label[24];
+        snprintf(label, sizeof(label), "#%d  R:%d", m_puzzleIndex + 1, m_puzzleRating);
+        m_statusBar.setCenter(label);
+        if (m_uiState != UIState::GameOver) {
+            if (m_puzzleFeedbackUntil != 0 &&
+                static_cast<int32_t>(m_puzzleFeedbackUntil - millis()) > 0)
+                m_statusBar.setRight("Try again");
+            else m_statusBar.setRight(m_puzzleAutoPlayPending ? "Replying..." : "Your move");
+        }
+        return;
+    }
     // Left: whose turn / online status / AI status
     if (m_aiThinking) {
         m_statusBar.setLeft("Thinking...");
@@ -1299,8 +1338,7 @@ void ChessScene::checkGameEnd(bool notifyPeer,
                    TerminationReason::InsufficientMaterial,
                    "Insufficient", "Material for mate.", notifyPeer,
                    terminalTimestamp);
-    } else if (!m_historyOverflow &&
-               ChessRules::isThreefoldRepetition(
+    } else if (ChessRules::isThreefoldRepetition(
                    m_board, m_history, m_historyCount)) {
         m_statusBar.setRight("Draw");
         finishGame(GameOutcome::Draw, TerminationReason::Repetition,
@@ -1890,11 +1928,9 @@ void ChessScene::renderCell(Canvas& canvas, uint8_t col, uint8_t gridRow,
 void ChessScene::rebuildMoveList() {
     m_moveList.clearItems();
 
-    // Replay all moves to rebuild the list text
-    ChessBoard tempBoard;
-    tempBoard.setVariant(m_variant);
-    tempBoard.setPositionIndex(m_positionIndex);
-    tempBoard.reset();
+    // Recover the start of the retained history, including puzzle positions.
+    ChessBoard tempBoard = m_board;
+    for (int i = m_historyCount - 1; i >= 0; --i) tempBoard.unmakeMove(m_history[i]);
 
     for (uint8_t i = 0; i < m_historyCount; i++) {
         const Move& move = m_history[i].move;
@@ -1918,6 +1954,10 @@ void ChessScene::rebuildMoveList() {
                 const char* existing = m_moveList.getItem(m_moveList.itemCount() - 1);
                 snprintf(line, sizeof(line), "%s %s", existing, sanBuf);
                 m_moveList.setItem(m_moveList.itemCount() - 1, line);
+            } else {
+                char line[32];
+                snprintf(line, sizeof(line), "%d... %s", tempBoard.fullmoveNumber() - 1, sanBuf);
+                m_moveList.addItem(line);
             }
         }
     }
@@ -2089,9 +2129,9 @@ bool ChessScene::loadSavedGame() {
         }
     }
 
-    if (!loadResult.participantsEmbedded) {
+    if (loadResult.sourceVersion < ChessStorageCodec::CURRENT_VERSION) {
         // Do not let play continue on a legacy save until its board and
-        // participants have been atomically upgraded to v6.
+        // participants have been atomically upgraded to the current format.
         if (!saveGameState()) return false;
     }
 
@@ -2319,6 +2359,8 @@ void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
         return;
     }
     m_puzzleMode = true;
+    m_puzzleRating = prating;
+    m_puzzleFeedbackUntil = 0;
 
     // Load progress
     PuzzleStorage::loadProgress(m_puzzleProgress);
@@ -2346,19 +2388,8 @@ void ChessScene::setPuzzleMode(uint8_t puzzleIndex) {
         m_boardGrid.setCursor(toGridCol(king.col), toGridRow(king.row));
     }
 
-    // Status bar
-    const char* typeStr = "Puzzle";
-    if (m_puzzleType == PuzzleType::MateIn1) typeStr = "Mate in 1";
-    else if (m_puzzleType == PuzzleType::MateIn2) typeStr = "Mate in 2";
-    else if (m_puzzleType == PuzzleType::Tactic) typeStr = "Tactic";
-    m_statusBar.setLeft(typeStr);
-
-    char centerBuf[24];
-    snprintf(centerBuf, sizeof(centerBuf), "#%d  R:%d", puzzleIndex + 1, prating);
-    m_statusBar.setCenter(centerBuf);
-    m_statusBar.setRight("");
-
-    m_hintBar.setText("[H]int [S]kip");
+    updateStatusBar();
+    updateHintBar();
     m_movesLabel.setText("Puzzle");
     m_boardGrid.markDirty();
 }
@@ -3322,7 +3353,6 @@ void ChessScene::onControlReceived(const ControlNetMsg& msg) {
                     break;
                 case TerminationReason::Repetition:
                     valid = msg.relatedEventId == 0 &&
-                            !m_historyOverflow &&
                             msg.boardHash == boardHash &&
                             remoteOutcome == GameOutcome::Draw &&
                             ChessRules::isThreefoldRepetition(
@@ -3349,9 +3379,9 @@ void ChessScene::onControlReceived(const ControlNetMsg& msg) {
                         sender == PieceColor::White
                             ? msg.whiteRemainingMs
                             : msg.blackRemainingMs;
-                    valid = msg.relatedEventId == 0 &&
+                    valid = m_clock.enabled() && msg.relatedEventId == 0 &&
                             msg.boardHash == boardHash &&
-                            remoteOutcome == receiverWin &&
+                            remoteOutcome == timeoutOutcome(sender) &&
                             m_board.sideToMove() == sender &&
                             senderRemaining == 0;
                     break;
@@ -3434,15 +3464,7 @@ void ChessScene::onControlReceived(const ControlNetMsg& msg) {
                     m_clock.update(now);
                     if (m_clock.hasFlaggedSide() &&
                         m_clock.flaggedSide() == m_localColor) {
-                        const GameOutcome outcome =
-                            m_localColor == PieceColor::White
-                                ? GameOutcome::BlackWin
-                                : GameOutcome::WhiteWin;
-                        finishGame(outcome, TerminationReason::Timeout,
-                                   "Time's Up!",
-                                   outcome == GameOutcome::WhiteWin
-                                       ? "White wins!" : "Black wins!",
-                                   true);
+                        finishTimeout(m_localColor);
                         return;
                     }
                 }
@@ -3659,6 +3681,19 @@ bool ChessScene::localMoveBlockedByControl() const {
     return m_netMode == NetworkMode::Online && m_timeGiftPending;
 }
 
+GameOutcome ChessScene::timeoutOutcome(PieceColor flagged) const {
+    if (ChessRules::hasInsufficientMatingMaterial(m_board, opponent(flagged)))
+        return GameOutcome::Draw;
+    return flagged == PieceColor::White ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+}
+
+void ChessScene::finishTimeout(PieceColor flagged) {
+    const GameOutcome outcome = timeoutOutcome(flagged);
+    const char* message = outcome == GameOutcome::Draw ? "Draw: no mating material."
+        : outcome == GameOutcome::WhiteWin ? "White wins!" : "Black wins!";
+    finishGame(outcome, TerminationReason::Timeout, "Time's Up!", message, true);
+}
+
 void ChessScene::finishDeferredTimeoutIfReady() {
     if (!m_deferredLocalTimeout || m_timeGiftPending ||
         m_resultOutcome != GameOutcome::None) {
@@ -3667,13 +3702,7 @@ void ChessScene::finishDeferredTimeoutIfReady() {
 
     const PieceColor flagged = m_deferredFlaggedSide;
     m_deferredLocalTimeout = false;
-    const GameOutcome outcome = flagged == PieceColor::White
-        ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
-    finishGame(outcome, TerminationReason::Timeout,
-               "Time's Up!",
-               flagged == PieceColor::White
-                   ? "Black wins!" : "White wins!",
-               true);
+    finishTimeout(flagged);
 }
 
 void ChessScene::onConnectionLost(const char* message) {

@@ -8,13 +8,15 @@
 // =====================================================================
 // Chess Network Protocol: packed ESP-NOW messages.
 //
-// Protocol v5 deliberately keeps every packet at or below 32 bytes.  The
+// Protocol v6 deliberately keeps every packet at or below 32 bytes.  The
 // pairing header identifies a lobby advertisement, while NetGameHeader is
 // common to every session-scoped packet so stale games can be rejected before
 // any payload is acted upon.
 // =====================================================================
 
-static constexpr uint8_t NET_PROTOCOL_VERSION = 5;
+// v6 retains the v5 layout but requires matching draw adjudication (legal EP
+// repetition and per-side timeout material). A v5 peer can reject those results.
+static constexpr uint8_t NET_PROTOCOL_VERSION = 6;
 static constexpr uint8_t NET_PACKET_MAX_SIZE = 32;
 static constexpr uint8_t NET_DISPLAY_NAME_MAX = 12;
 static constexpr uint8_t NET_DISPLAY_NAME_BYTES = NET_DISPLAY_NAME_MAX + 1;

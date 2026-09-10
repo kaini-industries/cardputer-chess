@@ -23,49 +23,17 @@ void InputManager::poll() {
     M5Cardputer.update();
 
     // Track BtnA (G0 side button) state for ESC
-    bool btnAHeld = M5Cardputer.BtnA.isHolding() || M5Cardputer.BtnA.wasPressed();
-    bool btnAPressed = M5Cardputer.BtnA.wasPressed();
-    bool btnAReleased = M5Cardputer.BtnA.wasReleased();
+    bool btnAHeld = M5Cardputer.BtnA.isPressed();
 
-    // No keyboard change — only process BtnA events
-    if (!M5Cardputer.Keyboard.isChange()) {
-        // Maintain BtnA ESC state even when keyboard is idle
-        if (btnAHeld) setKeyState(Key::ESCAPE, true);
-
-        if (btnAPressed) {
-            InputEvent evt;
-            evt.type = EventType::KeyDown;
-            evt.key = Key::ESCAPE;
-            evt.character = 0;
-            evt.modifiers = Mod::NONE;
-            pushEvent(evt);
-            m_repeatKey = Key::ESCAPE;
-            m_repeatTime = millis();
-            m_repeatActive = false;
-        } else if (btnAReleased) {
-            setKeyState(Key::ESCAPE, false);
-            InputEvent evt;
-            evt.type = EventType::KeyUp;
-            evt.key = Key::ESCAPE;
-            evt.character = 0;
-            evt.modifiers = Mod::NONE;
-            pushEvent(evt);
-            if (m_repeatKey == Key::ESCAPE) {
-                m_repeatKey = Key::NONE;
-                m_repeatActive = false;
-            }
-        }
-        return;
-    }
-
-    // Clear current state only when we have new data
+    // isChange() in M5Cardputer compares key counts, so it misses equal-count
+    // swaps. Sample identities every frame and keep servicing held-key repeat.
     memset(m_keyCurrent, 0, sizeof(m_keyCurrent));
 
+    uint8_t modifiers = Mod::NONE;
     if (M5Cardputer.Keyboard.isPressed()) {
-        Keyboard_Class::KeysState state = M5Cardputer.Keyboard.keysState();
+        const auto& state = M5Cardputer.Keyboard.keysState();
 
         // Track modifier state
-        uint8_t modifiers = Mod::NONE;
         if (state.shift) modifiers |= Mod::SHIFT;
         if (state.fn)    modifiers |= Mod::FN;
         if (state.opt)   modifiers |= Mod::OPT;
@@ -146,8 +114,9 @@ void InputManager::poll() {
 
     // Preserve BtnA ESC state after keyboard memset
     if (btnAHeld) {
+        const bool keyboardEscape = getKeyState(m_keyCurrent, Key::ESCAPE);
         setKeyState(Key::ESCAPE, true);
-        if (btnAPressed) {
+        if (!keyboardEscape && !getKeyState(m_keyPrevious, Key::ESCAPE)) {
             InputEvent evt;
             evt.type = EventType::KeyDown;
             evt.key = Key::ESCAPE;
@@ -158,8 +127,6 @@ void InputManager::poll() {
             m_repeatTime = millis();
             m_repeatActive = false;
         }
-    } else if (btnAReleased) {
-        setKeyState(Key::ESCAPE, false);
     }
 
     // Generate KeyUp events for keys that were held last frame but not now
@@ -192,7 +159,7 @@ void InputManager::poll() {
             evt.key = m_repeatKey;
             evt.character = (m_repeatKey >= 32 && m_repeatKey < 127)
                             ? (char)m_repeatKey : 0;
-            evt.modifiers = Mod::NONE;
+            evt.modifiers = modifiers;
             pushEvent(evt);
 
             m_repeatTime = now;

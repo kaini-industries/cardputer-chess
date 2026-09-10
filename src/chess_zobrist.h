@@ -12,6 +12,9 @@
 namespace ChessZobrist {
     // Compute full hash of a board position
     uint32_t hash(const ChessBoard& board);
+
+    // Position identity for repetition: EP matters only if a legal capture exists.
+    uint32_t repetitionHash(const ChessBoard& board);
 }
 
 #endif // CHESS_ZOBRIST_H

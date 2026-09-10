@@ -157,13 +157,13 @@ static int16_t scoreMoveForOrdering(const Move& move, const ChessBoard& board) {
 static void sortMoves(MoveList& moves, const ChessBoard& board) {
     // Pre-compute scores then insertion sort (move list is typically <40 moves)
     int16_t scores[MoveList::MAX_MOVES];
-    for (uint8_t i = 0; i < moves.count; i++) {
+    for (uint16_t i = 0; i < moves.count; i++) {
         scores[i] = scoreMoveForOrdering(moves.moves[i], board);
     }
-    for (uint8_t i = 1; i < moves.count; i++) {
+    for (uint16_t i = 1; i < moves.count; i++) {
         Move key = moves.moves[i];
         int16_t keyScore = scores[i];
-        int8_t j = i - 1;
+        int j = static_cast<int>(i) - 1;
         while (j >= 0 && scores[j] < keyScore) {
             moves.moves[j + 1] = moves.moves[j];
             scores[j + 1] = scores[j];
@@ -180,14 +180,31 @@ static uint32_t s_searchDeadline = 0;
 static bool     s_searchAborted  = false;
 
 static constexpr int MAX_QUIESCE_DEPTH = 8;
+// Bound checking extensions as well as captures on the ESP32 task stack.
+static constexpr int MAX_SEARCH_PLY = 12;
+// Above every legal material evaluation, including promoted-piece positions.
+static constexpr int16_t MATE_SCORE = 30000;
+static constexpr int16_t SEARCH_INFINITY = 32000;
 
 // Quiescence search: only consider captures to avoid horizon effect
-static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdepth) {
+static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta,
+                       int qdepth, int ply = 0) {
     if (s_searchAborted) return 0;
 
     bool inCheck = ChessRules::isInCheck(board, board.sideToMove());
 
-    if (millis() > s_searchDeadline) { s_searchAborted = true; return 0; }
+    if (static_cast<int32_t>(millis() - s_searchDeadline) >= 0) {
+        s_searchAborted = true;
+        return 0;
+    }
+
+    MoveList moves;
+    ChessRules::generateLegal(board, moves);
+    if (moves.count == 0) return inCheck ? -MATE_SCORE + ply : 0;
+    if (ChessRules::isDraw50Move(board) ||
+        ChessRules::isInsufficientMaterial(board)) return 0;
+    // Terminal positions are checked even at the hard stack limit.
+    if (ply >= MAX_SEARCH_PLY) return ChessAI::evaluate(board);
 
     if (!inCheck) {
         int16_t standPat = ChessAI::evaluate(board);
@@ -197,10 +214,7 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdept
 
     if (qdepth >= MAX_QUIESCE_DEPTH && !inCheck) return alpha;
 
-    MoveList moves;
-    ChessRules::generateLegal(board, moves);
-
-    for (uint8_t i = 0; i < moves.count; i++) {
+    for (uint16_t i = 0; i < moves.count; i++) {
         const Move& m = moves.moves[i];
 
         // Only consider captures and promotions (but search all moves when in check)
@@ -210,7 +224,7 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdept
         }
 
         MoveRecord rec = board.makeMove(m);
-        int16_t score = -quiesce(board, -beta, -alpha, qdepth + 1);
+        int16_t score = -quiesce(board, -beta, -alpha, qdepth + 1, ply + 1);
         board.unmakeMove(rec);
 
         if (score >= beta) return beta;
@@ -220,15 +234,17 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta, int qdept
     return alpha;
 }
 
-static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha, int16_t beta) {
+static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha,
+                         int16_t beta, int ply) {
     // Check time limit periodically
-    if ((depth <= 0 || depth % 2 == 0) && millis() > s_searchDeadline) {
+    if ((depth <= 0 || depth % 2 == 0) &&
+        static_cast<int32_t>(millis() - s_searchDeadline) >= 0) {
         s_searchAborted = true;
         return 0;
     }
 
     if (depth <= 0) {
-        return quiesce(board, alpha, beta, 0);
+        return quiesce(board, alpha, beta, 0, ply);
     }
 
     MoveList moves;
@@ -237,21 +253,22 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha, int16_t be
     // No legal moves: checkmate or stalemate
     if (moves.count == 0) {
         if (ChessRules::isInCheck(board, board.sideToMove())) {
-            return -10000 + (6 - depth); // Prefer faster checkmates
+            return -MATE_SCORE + ply; // Prefer faster checkmates
         }
         return 0; // Stalemate
     }
 
     // Draw detection
-    if (board.halfmoveClock() >= 100) return 0; // 50-move rule
+    if (ChessRules::isDraw50Move(board) ||
+        ChessRules::isInsufficientMaterial(board)) return 0;
 
     sortMoves(moves, board);
 
-    for (uint8_t i = 0; i < moves.count; i++) {
+    for (uint16_t i = 0; i < moves.count; i++) {
         if (s_searchAborted) return 0;
 
         MoveRecord rec = board.makeMove(moves.moves[i]);
-        int16_t score = -alphaBeta(board, depth - 1, -beta, -alpha);
+        int16_t score = -alphaBeta(board, depth - 1, -beta, -alpha, ply + 1);
         board.unmakeMove(rec);
 
         if (score >= beta) return beta;
@@ -301,20 +318,20 @@ Move ChessAI::findBestMove(ChessBoard& board, AIDifficulty difficulty) {
     sortMoves(moves, board);
 
     Move bestMove = moves.moves[0];
-    int16_t bestScore = -20000;
+    int16_t bestScore = -SEARCH_INFINITY;
 
     // Iterative deepening
     for (int depth = 1; depth <= maxDepth; depth++) {
         if (s_searchAborted) break;
 
         Move iterBest = moves.moves[0];
-        int16_t iterBestScore = -20000;
+        int16_t iterBestScore = -SEARCH_INFINITY;
 
-        for (uint8_t i = 0; i < moves.count; i++) {
+        for (uint16_t i = 0; i < moves.count; i++) {
             if (s_searchAborted) break;
 
             MoveRecord rec = board.makeMove(moves.moves[i]);
-            int16_t score = -alphaBeta(board, depth - 1, -20000, -iterBestScore);
+            int16_t score = -alphaBeta(board, depth - 1, -SEARCH_INFINITY, -iterBestScore, 1);
             board.unmakeMove(rec);
 
             if (!s_searchAborted && score > iterBestScore) {
