@@ -313,7 +313,8 @@ hardware-validation gates.
 |---------|---------|---------|
 | [M5Unified](https://github.com/m5stack/M5Unified) | 0.2.10 | Unified hardware abstraction |
 | [M5Cardputer](https://github.com/m5stack/M5Cardputer) | 1.1.1 | Cardputer keyboard and hardware |
-| [M5GFX](https://github.com/m5stack/M5GFX) | 0.2.16 | Graphics library |
+| [M5GFX](https://github.com/m5stack/M5GFX) | 0.2.25 (pinned source commit) | Graphics library |
+| [IRremote](https://github.com/Arduino-IRremote/Arduino-IRremote) | 4.7.1 | Cardputer infrared dependency |
 
 ## License
 
