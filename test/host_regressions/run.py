@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST = Path(__file__).resolve().parent
 COMMON = ["chess960", "chess_board", "chess_rules", "chess_zobrist", "chess_opening_book"]
 SCENE = COMMON + ["chess_ai", "chess_clock", "chess_scene", "chess_storage", "chess_storage_codec",
-                  "cursor_navigation", "game_records", "lobby_scene", "profile_storage",
+                  "cursor_navigation", "game_records", "lobby_scene", "net_crypto", "profile_storage",
                   "profile_storage_codec", "puzzle_data"]
 UI = ["cardgfx", "cardgfx_canvas", "cardgfx_scene", "cardgfx_widget", "cardgfx_input", "cardgfx_layout"]
 compiler = shlex.split(os.environ.get("CXX", "clang++"))

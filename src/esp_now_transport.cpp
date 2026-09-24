@@ -160,7 +160,11 @@ void EspNowTransport::shutdown() {
         }
     };
 
-    if (m_hasPeer && !removePeer()) {
+    bool hasPeer = false;
+    portENTER_CRITICAL(&s_rxMux);
+    hasPeer = m_hasPeer;
+    portEXIT_CRITICAL(&s_rxMux);
+    if (hasPeer && !removePeer()) {
         rememberCleanupError(Error::RemovePeer,
                              static_cast<esp_err_t>(m_lastEspError));
     }
@@ -202,8 +206,10 @@ void EspNowTransport::shutdown() {
         rememberCleanupError(Error::WifiMode, ESP_FAIL);
     }
     m_state = State::Idle;
+    portENTER_CRITICAL(&s_rxMux);
     m_hasPeer = false;
     memset(m_peerMac, 0, sizeof(m_peerMac));
+    portEXIT_CRITICAL(&s_rxMux);
     resetReceiveQueue();
 
     if (cleanupError != Error::None) {
@@ -228,12 +234,21 @@ bool EspNowTransport::addPeer(const uint8_t mac[6]) {
         return false;
     }
 
-    if (m_hasPeer && memcmp(mac, m_peerMac, 6) == 0 &&
+    uint8_t pairedMac[6] = {};
+    bool hasPeer = false;
+    portENTER_CRITICAL(&s_rxMux);
+    hasPeer = m_hasPeer;
+    if (hasPeer) {
+        memcpy(pairedMac, m_peerMac, 6);
+    }
+    portEXIT_CRITICAL(&s_rxMux);
+
+    if (hasPeer && memcmp(mac, pairedMac, 6) == 0 &&
         esp_now_is_peer_exist(mac)) {
         return true;
     }
 
-    if (m_hasPeer && !removePeer()) return false;
+    if (hasPeer && !removePeer()) return false;
 
     // Recover from any ESP-NOW peer entry which outlived our local flag.
     if (esp_now_is_peer_exist(mac)) {
@@ -257,15 +272,28 @@ bool EspNowTransport::addPeer(const uint8_t mac[6]) {
         return false;
     }
 
+    // Publish only after esp_now_add_peer returns. Holding s_rxMux across that
+    // call can block the Wi-Fi task, which takes the same mux in _onReceive.
+    portENTER_CRITICAL(&s_rxMux);
     memcpy(m_peerMac, mac, 6);
     m_hasPeer = true;
+    portEXIT_CRITICAL(&s_rxMux);
     m_state = State::Paired;
     m_lastRecvTime = millis();
     return true;
 }
 
 bool EspNowTransport::removePeer() {
-    if (!m_hasPeer) {
+    uint8_t pairedMac[6] = {};
+    bool hasPeer = false;
+    portENTER_CRITICAL(&s_rxMux);
+    hasPeer = m_hasPeer;
+    if (hasPeer) {
+        memcpy(pairedMac, m_peerMac, 6);
+    }
+    portEXIT_CRITICAL(&s_rxMux);
+
+    if (!hasPeer) {
         if (m_state == State::Paired || m_state == State::Disconnected) {
             m_state = m_espNowInitialized ? State::Ready : State::Idle;
         }
@@ -274,15 +302,17 @@ bool EspNowTransport::removePeer() {
 
     bool success = true;
     if (m_espNowInitialized) {
-        const esp_err_t result = esp_now_del_peer(m_peerMac);
+        const esp_err_t result = esp_now_del_peer(pairedMac);
         if (result != ESP_OK && result != ESP_ERR_ESPNOW_NOT_FOUND) {
             setError(Error::RemovePeer, result);
             success = false;
         }
     }
 
+    portENTER_CRITICAL(&s_rxMux);
     m_hasPeer = false;
     memset(m_peerMac, 0, sizeof(m_peerMac));
+    portEXIT_CRITICAL(&s_rxMux);
     m_state = m_espNowInitialized ? State::Ready : State::Idle;
     return success;
 }
@@ -322,14 +352,23 @@ bool EspNowTransport::broadcast(const uint8_t* data, uint8_t len) {
 }
 
 bool EspNowTransport::send(const uint8_t* data, uint8_t len) {
-    if (m_state != State::Paired || !m_hasPeer || data == nullptr ||
+    uint8_t pairedMac[6] = {};
+    bool hasPeer = false;
+    portENTER_CRITICAL(&s_rxMux);
+    hasPeer = m_hasPeer;
+    if (hasPeer) {
+        memcpy(pairedMac, m_peerMac, 6);
+    }
+    portEXIT_CRITICAL(&s_rxMux);
+
+    if (m_state != State::Paired || !hasPeer || data == nullptr ||
         len == 0 || len > RX_SLOT_SIZE) {
         setError(Error::InvalidArgument, ESP_ERR_INVALID_ARG);
         return false;
     }
 
     m_lastSendDelivered = false;
-    const esp_err_t result = esp_now_send(m_peerMac, data, len);
+    const esp_err_t result = esp_now_send(pairedMac, data, len);
     if (result != ESP_OK) {
         ++m_sendQueueFailures;
         setError(Error::SendQueue, result);
@@ -349,7 +388,17 @@ void EspNowTransport::_onSend(const uint8_t* /*mac*/, bool delivered) {
 // ── MAC Filtering ────────────────────────────────────────────────────
 
 bool EspNowTransport::isPeerMac(const uint8_t mac[6]) const {
-    return mac != nullptr && m_hasPeer && memcmp(mac, m_peerMac, 6) == 0;
+    if (mac == nullptr) return false;
+
+    uint8_t pairedMac[6] = {};
+    bool hasPeer = false;
+    portENTER_CRITICAL(&s_rxMux);
+    hasPeer = m_hasPeer;
+    if (hasPeer) {
+        memcpy(pairedMac, m_peerMac, 6);
+    }
+    portEXIT_CRITICAL(&s_rxMux);
+    return hasPeer && memcmp(mac, pairedMac, 6) == 0;
 }
 
 // ── Receiving ────────────────────────────────────────────────────────
@@ -379,14 +428,19 @@ void EspNowTransport::_onReceive(const uint8_t* mac,
 
     // Once paired, only the exact selected MAC can affect receive freshness or
     // enter the queue. This check is repeated by protocol consumers as well.
-    if (m_hasPeer && memcmp(mac, m_peerMac, 6) != 0) {
-        portENTER_CRITICAL_ISR(&s_rxMux);
+    // Copy the paired identity under s_rxMux first; memcmp must not touch the
+    // live fields the main task publishes.
+    portENTER_CRITICAL_ISR(&s_rxMux);
+    uint8_t pairedMac[6] = {};
+    const bool hasPeer = m_hasPeer;
+    if (hasPeer) {
+        memcpy(pairedMac, m_peerMac, 6);
+    }
+    if (hasPeer && memcmp(mac, pairedMac, 6) != 0) {
         ++m_rxRejected;
         portEXIT_CRITICAL_ISR(&s_rxMux);
         return;
     }
-
-    portENTER_CRITICAL_ISR(&s_rxMux);
 
     if (m_rxCount >= RX_SLOTS) {
         // Drop the newest packet rather than overwriting m_rxTail. The oldest

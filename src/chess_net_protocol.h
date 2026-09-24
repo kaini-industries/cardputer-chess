@@ -2,22 +2,23 @@
 #define CHESS_NET_PROTOCOL_H
 
 #include "chess_types.h"
+#include "net_crypto.h"
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 // =====================================================================
 // Chess Network Protocol: packed ESP-NOW messages.
 //
-// Protocol v6 deliberately keeps every packet at or below 32 bytes.  The
-// pairing header identifies a lobby advertisement, while NetGameHeader is
-// common to every session-scoped packet so stale games can be rejected before
-// any payload is acted upon.
+// Protocol v7. Discovery and AcceptGame carry public keys. Session packets
+// end with a truncated HMAC tag. ResignMsg stays 10 bytes and is ignored;
+// resignation is an authenticated GameEnd. Any other version is rejected.
+// NetGameHeader is common to every session-scoped packet so stale games can
+// be rejected before any payload is acted upon.
 // =====================================================================
 
-// v6 retains the v5 layout but requires matching draw adjudication (legal EP
-// repetition and per-side timeout material). A v5 peer can reject those results.
-static constexpr uint8_t NET_PROTOCOL_VERSION = 6;
-static constexpr uint8_t NET_PACKET_MAX_SIZE = 32;
+static constexpr uint8_t NET_PROTOCOL_VERSION = 7;
+static constexpr uint8_t NET_PACKET_MAX_SIZE = 64;
 static constexpr uint8_t NET_DISPLAY_NAME_MAX = 12;
 static constexpr uint8_t NET_DISPLAY_NAME_BYTES = NET_DISPLAY_NAME_MAX + 1;
 
@@ -111,11 +112,13 @@ struct DiscoveryMsg {
     uint16_t positionIndex = 518;  // Chess960 position (518 = standard)
     uint8_t  timeControl = 0;      // TimeControl as uint8_t
     char     displayName[NET_DISPLAY_NAME_BYTES] = {};
+    uint8_t  publicKey[32] = {};
 };
 
 struct AcceptGameMsg {
     NetPairingHeader header = {NetMsgType::AcceptGame};
     char displayName[NET_DISPLAY_NAME_BYTES] = {};
+    uint8_t publicKey[32] = {};
 };
 
 struct GameStartMsg {
@@ -124,10 +127,12 @@ struct GameStartMsg {
     uint8_t  variant = 0;         // ChessVariant as uint8_t
     uint16_t positionIndex = 518;
     uint8_t  timeControl = 0;     // TimeControl as uint8_t
+    uint32_t tag = 0;
 };
 
 struct GameStartAckMsg {
     NetGameHeader header = {NetMsgType::GameStartAck};
+    uint32_t tag = 0;
 };
 
 // ── Gameplay ─────────────────────────────────────────────────────────
@@ -144,6 +149,7 @@ struct MoveNetMsg {
     uint32_t moverRemainingMs = 0;
     uint32_t preBoardHash = 0;
     uint32_t postBoardHash = 0;
+    uint32_t tag = 0;
 };
 
 struct MoveAckMsg {
@@ -151,6 +157,7 @@ struct MoveAckMsg {
     uint16_t sequence = 0;
     NetAckStatus status = NetAckStatus::Accepted;
     uint32_t boardHash = 0;
+    uint32_t tag = 0;
 };
 
 struct HeartbeatMsg {
@@ -160,10 +167,11 @@ struct HeartbeatMsg {
     uint16_t positionEpoch = 0;
     uint16_t lastAppliedSequence = 0;
     uint32_t boardHash = 0;
+    uint32_t tag = 0;
 };
 
-// Kept for a short protocol-v5 migration path. New code should send a
-// ControlMsg with type GameEnd and termination Resignation instead.
+// Legacy one-way packet. Protocol v7 ignores Resign completely. Resignation
+// is a MACed Control GameEnd. This struct stays 10 bytes and is not tagged.
 struct ResignMsg {
     NetGameHeader header = {NetMsgType::Resign};
     uint16_t eventId = 0;
@@ -189,6 +197,7 @@ struct ControlNetMsg {
     uint32_t whiteRemainingMs = 0;
     uint32_t blackRemainingMs = 0;
     uint32_t boardHash = 0;
+    uint32_t tag = 0;
 };
 
 struct ControlAckMsg {
@@ -200,6 +209,7 @@ struct ControlAckMsg {
     // TimeGift ACKs carry the receiver's authoritative post-gift clock.
     // Other control acknowledgements leave this field at zero.
     uint32_t clockRemainingMs = 0;
+    uint32_t tag = 0;
 };
 
 #pragma pack(pop)
@@ -218,18 +228,59 @@ static_assert(offsetof(HeartbeatMsg, header) == 0, "Header must be first");
 static_assert(offsetof(ResignMsg, header) == 0, "Header must be first");
 static_assert(offsetof(ControlNetMsg, header) == 0, "Header must be first");
 static_assert(offsetof(ControlAckMsg, header) == 0, "Header must be first");
-static_assert(sizeof(DiscoveryMsg) == 21, "Unexpected Discovery layout");
-static_assert(sizeof(AcceptGameMsg) == 17, "Unexpected AcceptGame layout");
-static_assert(sizeof(GameStartMsg) == 13, "Unexpected GameStart layout");
-static_assert(sizeof(GameStartAckMsg) == 8, "Unexpected GameStartAck layout");
-static_assert(sizeof(MoveNetMsg) == 28, "Unexpected Move layout");
-static_assert(sizeof(MoveAckMsg) == 15, "Unexpected MoveAck layout");
-static_assert(sizeof(HeartbeatMsg) == 21, "Unexpected Heartbeat layout");
+static_assert(sizeof(DiscoveryMsg) == 53, "Unexpected Discovery layout");
+static_assert(sizeof(AcceptGameMsg) == 49, "Unexpected AcceptGame layout");
+static_assert(sizeof(GameStartMsg) == 17, "Unexpected GameStart layout");
+static_assert(sizeof(GameStartAckMsg) == 12, "Unexpected GameStartAck layout");
+static_assert(sizeof(MoveNetMsg) == 32, "Unexpected Move layout");
+static_assert(sizeof(MoveAckMsg) == 19, "Unexpected MoveAck layout");
+static_assert(sizeof(HeartbeatMsg) == 25, "Unexpected Heartbeat layout");
 static_assert(sizeof(ResignMsg) == 10, "Unexpected Resign layout");
-static_assert(sizeof(ControlNetMsg) == 31, "Unexpected Control layout");
-static_assert(sizeof(ControlAckMsg) == 20, "Unexpected ControlAck layout");
-static_assert(sizeof(ControlNetMsg) <= NET_PACKET_MAX_SIZE,
+static_assert(sizeof(ControlNetMsg) == 35, "Unexpected Control layout");
+static_assert(sizeof(ControlAckMsg) == 24, "Unexpected ControlAck layout");
+static_assert(offsetof(DiscoveryMsg, publicKey) == 21, "publicKey must trail");
+static_assert(offsetof(AcceptGameMsg, publicKey) == 17, "publicKey must trail");
+static_assert(offsetof(GameStartMsg, tag) == 13, "tag must trail");
+static_assert(offsetof(GameStartAckMsg, tag) == 8, "tag must trail");
+static_assert(offsetof(MoveNetMsg, tag) == 28, "tag must trail");
+static_assert(offsetof(MoveAckMsg, tag) == 15, "tag must trail");
+static_assert(offsetof(HeartbeatMsg, tag) == 21, "tag must trail");
+static_assert(offsetof(ControlNetMsg, tag) == 31, "tag must trail");
+static_assert(offsetof(ControlAckMsg, tag) == 20, "tag must trail");
+static_assert(sizeof(DiscoveryMsg) <= NET_PACKET_MAX_SIZE,
               "Largest protocol packet exceeds transport capacity");
+static_assert(sizeof(AcceptGameMsg) <= NET_PACKET_MAX_SIZE, "AcceptGame too large");
+static_assert(sizeof(GameStartMsg) <= NET_PACKET_MAX_SIZE, "GameStart too large");
+static_assert(sizeof(GameStartAckMsg) <= NET_PACKET_MAX_SIZE, "GameStartAck too large");
+static_assert(sizeof(MoveNetMsg) <= NET_PACKET_MAX_SIZE, "Move too large");
+static_assert(sizeof(MoveAckMsg) <= NET_PACKET_MAX_SIZE, "MoveAck too large");
+static_assert(sizeof(HeartbeatMsg) <= NET_PACKET_MAX_SIZE, "Heartbeat too large");
+static_assert(sizeof(ResignMsg) <= NET_PACKET_MAX_SIZE, "Resign too large");
+static_assert(sizeof(ControlNetMsg) <= NET_PACKET_MAX_SIZE, "Control too large");
+static_assert(sizeof(ControlAckMsg) <= NET_PACKET_MAX_SIZE, "ControlAck too large");
+
+// Stamp or check the trailing host-endian tag. packetTag covers every byte
+// before those four. Discovery, AcceptGame, and ResignMsg are not tagged.
+inline void stampSessionPacket(void* packet, size_t size,
+                               const uint8_t macKey[NetCrypto::KEY_SIZE]) {
+    if (packet == nullptr || macKey == nullptr || size < sizeof(uint32_t)) return;
+    auto* bytes = static_cast<uint8_t*>(packet);
+    const size_t prefix = size - sizeof(uint32_t);
+    const uint32_t tag = NetCrypto::packetTag(macKey, bytes, prefix);
+    std::memcpy(bytes + prefix, &tag, sizeof(tag));
+}
+
+inline bool sessionPacketTagMatches(const void* packet, size_t size,
+                                    const uint8_t macKey[NetCrypto::KEY_SIZE]) {
+    if (packet == nullptr || macKey == nullptr || size < sizeof(uint32_t)) {
+        return false;
+    }
+    const auto* bytes = static_cast<const uint8_t*>(packet);
+    const size_t prefix = size - sizeof(uint32_t);
+    uint32_t tag = 0;
+    std::memcpy(&tag, bytes + prefix, sizeof(tag));
+    return NetCrypto::tagsEqual(tag, NetCrypto::packetTag(macKey, bytes, prefix));
+}
 
 // ── Validation / conversion helpers ──────────────────────────────────
 

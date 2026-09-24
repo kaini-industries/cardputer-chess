@@ -148,6 +148,11 @@ private:
     uint8_t  m_opponentMac[6] = {};
     char     m_opponentName[NET_DISPLAY_NAME_BYTES] = {};
     bool     m_reackGameStart = false;
+    uint8_t  m_macKey[NetCrypto::KEY_SIZE] = {};
+    // Last accepted remote remaining time for each color. The first sample
+    // for a color sets the baseline and is not compared.
+    bool     m_hasRemoteClockBaseline[2] = {};
+    uint32_t m_remoteClockBaselineMs[2] = {};
 
     // Reliable move stream. Sequences are per-sender and independent of the
     // bounded local review history.
@@ -249,6 +254,10 @@ private:
     void leaveToMenu(bool discardUnsavedResult = false);
     void leaveOnlineGame(bool force = false,
                          bool discardUnsavedResult = false);
+    void quitUnfinishedOnlineGame();
+    bool remoteClockRaiseAllowed(PieceColor color, uint32_t sampleMs,
+                                 uint32_t maxRaiseMs) const;
+    void acceptRemoteClockSample(PieceColor color, uint32_t sampleMs);
     void showUnsavedResultModal(bool online);
     bool navigateBoardCursor(uint8_t key, uint8_t currentCol, uint8_t currentRow,
                              uint8_t& nextCol, uint8_t& nextRow);
@@ -328,7 +337,8 @@ public:
     void setNetworkMode(PieceColor localColor, uint32_t sessionId,
                         uint16_t gameId, const uint8_t opponentMac[6],
                         const char* localName, const char* opponentName,
-                        bool reackGameStart);
+                        bool reackGameStart,
+                        const uint8_t macKey[NetCrypto::KEY_SIZE]);
     void clearNetworkMode();
 
     // Called by LobbyScene to resume a saved game

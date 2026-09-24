@@ -117,9 +117,9 @@ In multi-move puzzles (mate-in-2, tactics), the opponent's response is auto-play
 
 ESP-NOW is a connectionless WiFi peer-to-peer protocol — no router or network setup needed. Both devices just need to be within WiFi range (~30m indoors). Pairing times out after 60 seconds.
 
-The host broadcasts a discovery message every 500ms. Joiners see the host's profile name, MAC suffix, variant, and time control. Pairing requests and game-start packets are retried until acknowledged. During play, protocol-v6 packets are bound to a nonzero game and session ID, filtered to the selected peer MAC, sequence checked, acknowledged, and protected against stale or divergent board state with position epochs and hashes. Clock heartbeats, draw responses, acknowledged time gifts, and terminal results also use session-scoped validation and retry handling.
+The host broadcasts a discovery message every 500ms. Discovery and accept packets carry public keys, and both devices show a 6-digit pair code before the game starts. Joiners see the host's profile name, MAC suffix, variant, and time control. Pairing requests are retried until that code is showing, and the host keeps retransmitting the game-start packet until both players confirm the code or the 60-second pairing timeout cancels it. During play, protocol-v7 packets are bound to a nonzero game and session ID, filtered to the selected peer MAC, sequence checked, acknowledged, and protected against stale or divergent board state with position epochs and hashes. Session packets carry a truncated HMAC. Clock heartbeats, draw responses, acknowledged time gifts, and terminal results also use session-scoped validation and retry handling. Resignation is an authenticated GameEnd.
 
-Both devices must run a protocol-v6 build with matching draw rules. Older protocol-v5 builds must be upgraded on both devices; earlier multiplayer protocol versions are intentionally rejected.
+Both devices must run a protocol-v7 build with matching draw rules. Older versions, including v6, are rejected.
 
 ## Controls
 

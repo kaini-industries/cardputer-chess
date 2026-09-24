@@ -21,6 +21,10 @@ namespace ChessRules {
     // Requires a mutable board reference (uses makeMove/unmakeMove internally).
     void generateLegal(ChessBoard& board, MoveList& out);
 
+    // Same filter as generateLegal. `scratch` holds the pseudo-legal list so the
+    // caller can supply it (the search keeps that buffer off the recursive stack).
+    void generateLegalInto(ChessBoard& board, MoveList& legal, MoveList& scratch);
+
     // Generate legal moves originating from a specific square.
     void getLegalMovesFrom(ChessBoard& board, uint8_t col, uint8_t row, MoveList& out);
 
