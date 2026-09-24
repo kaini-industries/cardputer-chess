@@ -90,7 +90,7 @@ private:
 
     // Ring buffer for received packets (ISR-safe)
     static constexpr uint8_t RX_SLOTS = 4;
-    static constexpr uint8_t RX_SLOT_SIZE = 32;
+    static constexpr uint8_t RX_SLOT_SIZE = 64;
 
     struct RxSlot {
         uint8_t data[RX_SLOT_SIZE];

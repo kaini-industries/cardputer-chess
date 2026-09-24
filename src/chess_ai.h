@@ -20,8 +20,10 @@ enum class AIDifficulty : uint8_t {
 namespace ChessAI {
 
     // Find the best move for the current side to move.
-    // Returns a legal move. maxDepth and maxTimeMs are set by difficulty.
-    Move findBestMove(ChessBoard& board, AIDifficulty difficulty);
+    // Returns a legal move. Difficulty chooses the depth and the time budget
+    // (Easy 200ms, Medium 1000ms, Hard 3000ms). maxTimeMs == 0 keeps that budget;
+    // otherwise the budget is the minimum of the two.
+    Move findBestMove(ChessBoard& board, AIDifficulty difficulty, uint32_t maxTimeMs = 0);
 
     // Static evaluation of the position from the perspective of the side to move.
     // Positive = good for side to move, negative = bad.

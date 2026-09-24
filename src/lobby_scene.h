@@ -96,6 +96,12 @@ private:
     char m_localPlayerName[NET_DISPLAY_NAME_BYTES] = {};
     char m_opponentName[NET_DISPLAY_NAME_BYTES] = {};
     bool m_reackGameStart = false;
+    NetCrypto::KeyPair m_localKeyPair{};
+    uint8_t m_peerPublicKey[NetCrypto::KEY_SIZE] = {};
+    uint8_t m_macKey[NetCrypto::KEY_SIZE] = {};
+    bool m_localMatchConfirmed = false;
+    bool m_startAckLatched = false;
+    bool m_pairCodeVisible = false;
 
     // ── Game-Start Ack Retry State ───────────────────────────────
     uint8_t      m_startAckRetries = 0;
@@ -119,6 +125,7 @@ private:
         uint16_t positionIndex;
         TimeControl timeControl;
         char displayName[NET_DISPLAY_NAME_BYTES];
+        uint8_t publicKey[32];
         uint32_t lastSeen;
     };
     DiscoveredHost m_hosts[MAX_HOSTS] = {};
@@ -173,10 +180,15 @@ private:
     void rebuildHostList();
     void onPaired();
     void cancelPairing();
+    void clearPairingSecrets();
+    void showPairCodeModal(const char sas[7]);
+    void confirmPairMatch();
+    void tryFinishHostPairing();
     void configureChessScene();
     void ensureLocalPlayerName();
     void showTransportError(const char* action);
     void showPuzzleMenu();
+    uint16_t firstUnsolvedPuzzleIndex(PuzzleType type, const PuzzleProgress& progress) const;
     void startPuzzle(uint8_t index);
 };
 

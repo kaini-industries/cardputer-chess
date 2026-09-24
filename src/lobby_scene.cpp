@@ -74,6 +74,26 @@ static uint32_t randomSessionId() {
     return id;
 }
 
+static void wipeBytes(uint8_t* data, size_t length) {
+    volatile uint8_t* cursor = data;
+    for (size_t i = 0; i < length; ++i) cursor[i] = 0;
+}
+
+static NetCrypto::KeyPair makePairingKeyPair() {
+#if defined(ARDUINO)
+    // /dev/urandom is not a trustworthy entropy source on firmware.
+    NetCrypto::KeyPair keys{};
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t word = esp_random();
+        memcpy(keys.secret + static_cast<size_t>(i) * 4, &word, sizeof(word));
+    }
+    NetCrypto::derivePublic(keys.secret, keys.publicKey);
+    return keys;
+#else
+    return NetCrypto::generateKeyPair();
+#endif
+}
+
 static void copyRemoteNameOrDefault(
     char destination[NET_DISPLAY_NAME_BYTES],
     const char source[NET_DISPLAY_NAME_BYTES],
@@ -1243,6 +1263,8 @@ void LobbyScene::startHosting() {
     memset(m_peerMac, 0, sizeof(m_peerMac));
     memset(m_opponentName, 0, sizeof(m_opponentName));
     m_reackGameStart = false;
+    clearPairingSecrets();
+    m_localKeyPair = makePairingKeyPair();
     m_lastBroadcast = 0;
     m_stateStartTime = millis();
 
@@ -1275,6 +1297,7 @@ void LobbyScene::startJoining() {
     memset(m_peerMac, 0, sizeof(m_peerMac));
     memset(m_opponentName, 0, sizeof(m_opponentName));
     m_reackGameStart = false;
+    clearPairingSecrets();
     m_hostCount = 0;
     m_hostListDirty = false;
     m_connecting = false;
@@ -1295,15 +1318,22 @@ void LobbyScene::connectToHost(uint8_t hostIdx) {
     m_positionIndex = host.positionIndex;
     m_selectedTimeControl = host.timeControl;
     memcpy(m_peerMac, host.mac, 6);
+    memcpy(m_peerPublicKey, host.publicKey, sizeof(m_peerPublicKey));
     copyRemoteNameOrDefault(m_opponentName, host.displayName, host.mac);
     if (!transport.addPeer(host.mac)) {
         showTransportError("Peer setup");
         return;
     }
 
+    m_localKeyPair = makePairingKeyPair();
+    m_localMatchConfirmed = false;
+    m_startAckLatched = false;
+    m_pairCodeVisible = false;
     m_pendingAccept = AcceptGameMsg();
     m_pendingAccept.header.gameId = m_gameId;
     copyNetDisplayName(m_pendingAccept.displayName, m_localPlayerName);
+    memcpy(m_pendingAccept.publicKey, m_localKeyPair.publicKey,
+           sizeof(m_pendingAccept.publicKey));
     m_acceptRetries = 0;
     m_lastAcceptSendTime = 0;
 
@@ -1371,13 +1401,66 @@ void LobbyScene::rebuildHostList() {
     m_hostListDirty = false;
 }
 
+void LobbyScene::clearPairingSecrets() {
+    wipeBytes(m_localKeyPair.secret, sizeof(m_localKeyPair.secret));
+    memset(m_localKeyPair.publicKey, 0, sizeof(m_localKeyPair.publicKey));
+    wipeBytes(m_peerPublicKey, sizeof(m_peerPublicKey));
+    wipeBytes(m_macKey, sizeof(m_macKey));
+    m_localMatchConfirmed = false;
+    m_startAckLatched = false;
+    m_pairCodeVisible = false;
+}
+
+void LobbyScene::showPairCodeModal(const char sas[7]) {
+    char message[24];
+    snprintf(message, sizeof(message), "Pair code %s", sas);
+    m_menuModal.clearButtons();
+    m_menuModal.setTitle("Confirm pair");
+    m_menuModal.setMessage(message);
+    m_menuModal.setEscapeCallback([this]() { cancelPairing(); });
+    m_menuModal.addButton("Match", [this]() { confirmPairMatch(); });
+    m_menuModal.addButton("Cancel", [this]() { cancelPairing(); });
+    m_menuModal.show();
+    focusChain().focusWidget(&m_menuModal);
+    m_pairCodeVisible = true;
+}
+
+void LobbyScene::confirmPairMatch() {
+    if (!m_pairCodeVisible) return;
+    m_localMatchConfirmed = true;
+    m_pairCodeVisible = false;
+    m_menuModal.hide();
+    if (m_state == LobbyState::WaitingForStartAck) {
+        tryFinishHostPairing();
+        return;
+    }
+    if (m_state == LobbyState::Joining && m_connecting) {
+        GameStartAckMsg ack;
+        ack.header.gameId = m_gameId;
+        ack.header.sessionId = m_sessionId;
+        stampSessionPacket(&ack, sizeof(ack), m_macKey);
+        EspNowTransport::instance().send(
+            reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+        onPaired();
+    }
+}
+
+void LobbyScene::tryFinishHostPairing() {
+    if (m_state != LobbyState::WaitingForStartAck) return;
+    if (!m_localMatchConfirmed || !m_startAckLatched) return;
+    onPaired();
+}
+
 void LobbyScene::cancelPairing() {
+    m_connecting = false;
+    clearPairingSecrets();
     EspNowTransport::instance().shutdown();
     showMenu();
 }
 
 void LobbyScene::onPaired() {
     if (!requirePersistentState()) {
+        clearPairingSecrets();
         EspNowTransport::instance().shutdown();
         return;
     }
@@ -1387,7 +1470,8 @@ void LobbyScene::onPaired() {
     configureChessScene();
     m_chessScene->setNetworkMode(m_localColor, m_sessionId, m_gameId,
                                  m_peerMac, m_localPlayerName, m_opponentName,
-                                 m_reackGameStart);
+                                 m_reackGameStart, m_macKey);
+    clearPairingSecrets();
     CardGFX::scenes().push(m_chessScene);
 }
 
@@ -1405,6 +1489,7 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
             disc.positionIndex = m_positionIndex;
             disc.timeControl = static_cast<uint8_t>(m_selectedTimeControl);
             copyNetDisplayName(disc.displayName, m_localPlayerName);
+            memcpy(disc.publicKey, m_localKeyPair.publicKey, sizeof(disc.publicKey));
             if (!transport.broadcast(
                     reinterpret_cast<const uint8_t*>(&disc), sizeof(disc))) {
                 showTransportError("Discovery");
@@ -1434,15 +1519,31 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                 continue;
             }
 
+            uint8_t shared[NetCrypto::KEY_SIZE];
+            if (!NetCrypto::sharedSecret(m_localKeyPair.secret,
+                                         accept.publicKey, shared)) {
+                wipeBytes(shared, sizeof(shared));
+                continue;
+            }
+
             if (!transport.addPeer(mac)) {
+                wipeBytes(shared, sizeof(shared));
                 showTransportError("Peer setup");
                 continue;
             }
 
             memcpy(m_peerMac, mac, sizeof(m_peerMac));
+            memcpy(m_peerPublicKey, accept.publicKey, sizeof(m_peerPublicKey));
             copyRemoteNameOrDefault(m_opponentName, accept.displayName, mac);
             m_sessionId = randomSessionId();
             m_reackGameStart = false;
+            m_localMatchConfirmed = false;
+            m_startAckLatched = false;
+            NetCrypto::deriveMacKey(shared, m_macKey);
+            char sas[7];
+            NetCrypto::deriveSas(shared, m_localKeyPair.publicKey,
+                                 accept.publicKey, m_gameId, m_sessionId, sas);
+            wipeBytes(shared, sizeof(shared));
 
             m_pendingStart = GameStartMsg();
             m_pendingStart.header.gameId = m_gameId;
@@ -1454,17 +1555,21 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
             m_pendingStart.positionIndex = m_positionIndex;
             m_pendingStart.timeControl =
                 static_cast<uint8_t>(m_selectedTimeControl);
+            stampSessionPacket(&m_pendingStart, sizeof(m_pendingStart), m_macKey);
 
+            // Leave the hosting broadcast before the human compares codes.
+            m_state = LobbyState::WaitingForStartAck;
+            m_stateStartTime = millis();
+            m_startAckRetries = 0;
+            m_lastStartSendTime = m_stateStartTime;
             if (!transport.send(
                     reinterpret_cast<const uint8_t*>(&m_pendingStart),
                     sizeof(m_pendingStart))) {
-                showTransportError("Game start");
+                m_statusLabel.setText("Game start failed");
             } else {
                 m_statusLabel.setText("Starting game...");
             }
-            m_state = LobbyState::WaitingForStartAck;
-            m_startAckRetries = 0;
-            m_lastStartSendTime = millis();
+            showPairCodeModal(sas);
             return;
         }
 
@@ -1475,7 +1580,16 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
         }
 
     } else if (m_state == LobbyState::WaitingForStartAck) {
-        // Host is waiting for joiner to acknowledge GameStart
+        // The pair-code comparison cannot finish inside the old five-second
+        // ack budget. Keep the same GameStart bytes alive until the 60-second
+        // pairing timeout, then cancel.
+        if (now - m_stateStartTime > 60000) {
+            cancelPairing();
+            m_statusLabel.setText("Pairing timed out.");
+            m_menuModal.setMessage("Pairing timed out.");
+            return;
+        }
+
         uint8_t buf[NET_PACKET_MAX_SIZE];
         uint8_t mac[6];
         while (transport.hasReceived()) {
@@ -1486,18 +1600,20 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
 
             const NetMsgType type = static_cast<NetMsgType>(buf[0]);
             if (len == sizeof(GameStartAckMsg) &&
-                type == NetMsgType::GameStartAck) {
+                type == NetMsgType::GameStartAck &&
+                sessionPacketTagMatches(buf, len, m_macKey)) {
                 GameStartAckMsg ack;
                 memcpy(&ack, buf, sizeof(ack));
                 if (isValidGameHeader(ack.header, NetMsgType::GameStartAck,
                                       m_gameId, m_sessionId)) {
-                    onPaired();
-                    return;
+                    m_startAckLatched = true;
+                    tryFinishHostPairing();
+                    if (m_state == LobbyState::Paired) return;
                 }
             } else if (len == sizeof(AcceptGameMsg) &&
                        type == NetMsgType::AcceptGame) {
                 // A retried AcceptGame means the joiner did not receive our
-                // first start packet. Send it again immediately.
+                // first start packet. Send the same tagged bytes again.
                 AcceptGameMsg accept;
                 memcpy(&accept, buf, sizeof(accept));
                 if (isValidPairingHeader(accept.header,
@@ -1511,24 +1627,15 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
             }
         }
 
-        // Retransmit every 200ms, up to 25 retries (5 seconds total)
         if (now - m_lastStartSendTime > 200) {
-            if (m_startAckRetries < 25) {
-                if (!transport.send(
-                        reinterpret_cast<const uint8_t*>(&m_pendingStart),
-                        sizeof(m_pendingStart))) {
-                    showTransportError("Game start");
-                } else {
-                    m_statusLabel.setText("Starting game...");
-                }
-                m_startAckRetries++;
-                m_lastStartSendTime = now;
-            } else {
-                cancelPairing();
-                m_statusLabel.setText("Game start timed out.");
-                m_menuModal.setMessage("Game start timed out.");
-                return;
+            if (!transport.send(
+                    reinterpret_cast<const uint8_t*>(&m_pendingStart),
+                    sizeof(m_pendingStart))) {
+                m_statusLabel.setText("Game start failed");
+            } else if (!m_localMatchConfirmed) {
+                m_statusLabel.setText("Starting game...");
             }
+            m_lastStartSendTime = now;
         }
 
     } else if (m_state == LobbyState::Joining) {
@@ -1578,6 +1685,8 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                         host.timeControl =
                             static_cast<TimeControl>(disc.timeControl);
                         copyNetDisplayName(host.displayName, updatedName);
+                        memcpy(host.publicKey, disc.publicKey,
+                               sizeof(host.publicKey));
                         if (changed) m_hostListDirty = true;
                         found = true;
                         break;
@@ -1593,11 +1702,13 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                         static_cast<TimeControl>(disc.timeControl);
                     copyRemoteNameOrDefault(host.displayName,
                                             disc.displayName, mac);
+                    memcpy(host.publicKey, disc.publicKey, sizeof(host.publicKey));
                     host.lastSeen = now;
                     ++m_hostCount;
                     m_hostListDirty = true;
                 }
-            } else if (m_connecting && len == sizeof(GameStartMsg) &&
+            } else if (m_connecting && !m_pairCodeVisible &&
+                       len == sizeof(GameStartMsg) &&
                        static_cast<NetMsgType>(buf[0]) == NetMsgType::GameStart) {
                 GameStartMsg start;
                 memcpy(&start, buf, sizeof(start));
@@ -1618,27 +1729,41 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
                     continue;
                 }
 
+                uint8_t shared[NetCrypto::KEY_SIZE];
+                if (!NetCrypto::sharedSecret(m_localKeyPair.secret,
+                                             m_peerPublicKey, shared)) {
+                    wipeBytes(shared, sizeof(shared));
+                    continue;
+                }
+                uint8_t macKey[NetCrypto::KEY_SIZE];
+                NetCrypto::deriveMacKey(shared, macKey);
+                if (!sessionPacketTagMatches(&start, sizeof(start), macKey)) {
+                    wipeBytes(shared, sizeof(shared));
+                    wipeBytes(macKey, sizeof(macKey));
+                    continue;
+                }
+
                 m_localColor = (start.yourColor == 0)
                               ? PieceColor::White : PieceColor::Black;
                 m_sessionId = start.header.sessionId;
                 m_reackGameStart = true;
-
-                // Send acknowledgment back to host
-                GameStartAckMsg ack;
-                ack.header.gameId = m_gameId;
-                ack.header.sessionId = m_sessionId;
-                transport.send(
-                    reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
-
-                m_menuModal.hide();
-                onPaired();
+                memcpy(m_macKey, macKey, sizeof(m_macKey));
+                char sas[7];
+                NetCrypto::deriveSas(shared, m_peerPublicKey,
+                                     m_localKeyPair.publicKey, m_gameId,
+                                     m_sessionId, sas);
+                wipeBytes(shared, sizeof(shared));
+                wipeBytes(macKey, sizeof(macKey));
+                m_stateStartTime = now;
+                showPairCodeModal(sas);
                 return;
             }
         }
 
-        // AcceptGame is an application-level request and must be retried until
-        // GameStart arrives; a successful radio callback alone is insufficient.
-        if (m_connecting && now - m_lastAcceptSendTime > 250) {
+        // AcceptGame is retried until a tagged GameStart shows the pair code.
+        // A successful radio callback alone is not acknowledgement.
+        if (m_connecting && !m_pairCodeVisible &&
+            now - m_lastAcceptSendTime > 250) {
             sendPendingAccept();
         }
 
@@ -1679,6 +1804,17 @@ void LobbyScene::onTick(uint32_t /*dt_ms*/) {
 }
 
 // ── Puzzle Menu ──────────────────────────────────────────────────────
+
+uint16_t LobbyScene::firstUnsolvedPuzzleIndex(PuzzleType type,
+                                              const PuzzleProgress& progress) const {
+    uint16_t count = puzzleCountByType(type);
+    for (uint16_t n = 0; n < count; n++) {
+        uint16_t idx = puzzleIndexByType(type, n);
+        if (idx == 0xFFFF) break;
+        if (!PuzzleStorage::isPuzzleCompleted(progress, (uint8_t)idx)) return idx;
+    }
+    return puzzleIndexByType(type, 0);
+}
 
 void LobbyScene::showPuzzleMenu() {
     m_state = LobbyState::PuzzleCategory;
@@ -1729,7 +1865,9 @@ void LobbyScene::showPuzzleMenu() {
         snprintf(m1Buf, sizeof(m1Buf), "Mate1 (%d)", m1Count);
         m_menuModal.addButton(m1Buf, [this]() {
             m_menuModal.hide();
-            uint16_t idx = puzzleIndexByType(PuzzleType::MateIn1, 0);
+            PuzzleProgress prog;
+            PuzzleStorage::loadProgress(prog);
+            uint16_t idx = firstUnsolvedPuzzleIndex(PuzzleType::MateIn1, prog);
             if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
         });
     }
@@ -1738,7 +1876,9 @@ void LobbyScene::showPuzzleMenu() {
         snprintf(m2Buf, sizeof(m2Buf), "Mate2 (%d)", m2Count);
         m_menuModal.addButton(m2Buf, [this]() {
             m_menuModal.hide();
-            uint16_t idx = puzzleIndexByType(PuzzleType::MateIn2, 0);
+            PuzzleProgress prog;
+            PuzzleStorage::loadProgress(prog);
+            uint16_t idx = firstUnsolvedPuzzleIndex(PuzzleType::MateIn2, prog);
             if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
         });
     }
@@ -1747,7 +1887,9 @@ void LobbyScene::showPuzzleMenu() {
         snprintf(tBuf, sizeof(tBuf), "Tactic (%d)", tCount);
         m_menuModal.addButton(tBuf, [this]() {
             m_menuModal.hide();
-            uint16_t idx = puzzleIndexByType(PuzzleType::Tactic, 0);
+            PuzzleProgress prog;
+            PuzzleStorage::loadProgress(prog);
+            uint16_t idx = firstUnsolvedPuzzleIndex(PuzzleType::Tactic, prog);
             if (idx != 0xFFFF) startPuzzle((uint8_t)idx);
         });
     }

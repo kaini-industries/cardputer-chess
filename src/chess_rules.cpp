@@ -330,21 +330,25 @@ static void generatePseudoLegal(const ChessBoard& board, MoveList& out) {
 
 // ─── Legal Move Generation ────────────────────────────────────────
 
-void generateLegal(ChessBoard& board, MoveList& out) {
-    out.clear();
-    MoveList pseudo;
-    pseudo.clear();
-    generatePseudoLegal(board, pseudo);
+void generateLegalInto(ChessBoard& board, MoveList& legal, MoveList& scratch) {
+    legal.clear();
+    scratch.clear();
+    generatePseudoLegal(board, scratch);
 
     PieceColor side = board.sideToMove();
 
-    for (uint8_t i = 0; i < pseudo.count; i++) {
-        MoveRecord rec = board.makeMove(pseudo.moves[i]);
+    for (uint8_t i = 0; i < scratch.count; i++) {
+        MoveRecord rec = board.makeMove(scratch.moves[i]);
         if (!isInCheck(board, side)) {
-            out.add(pseudo.moves[i]);
+            legal.add(scratch.moves[i]);
         }
         board.unmakeMove(rec);
     }
+}
+
+void generateLegal(ChessBoard& board, MoveList& out) {
+    MoveList scratch;
+    generateLegalInto(board, out, scratch);
 }
 
 void getLegalMovesFrom(ChessBoard& board, uint8_t col, uint8_t row, MoveList& out) {
@@ -399,7 +403,9 @@ bool hasInsufficientMatingMaterial(const ChessBoard& board, PieceColor side) {
             else return false; // Pawns can promote; rooks and queens can mate.
         }
     }
-    if (knights) return knights == 1 && bishops == 0 && !enemyCanBlockKnightMate;
+    // One or two knights cannot mate a lone king or a king plus queens only.
+    // Three or more knights can mate, and a knight plus any bishop can mate.
+    if (knights) return knights <= 2 && bishops == 0 && !enemyCanBlockKnightMate;
     if (bishops) return bishopColors != 3 && !anyPawnOrKnight;
     return true; // Bare king.
 }

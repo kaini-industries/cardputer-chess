@@ -186,6 +186,11 @@ static constexpr int MAX_SEARCH_PLY = 12;
 static constexpr int16_t MATE_SCORE = 30000;
 static constexpr int16_t SEARCH_INFINITY = 32000;
 
+// One legal-move list per ply, plus one pseudo-legal scratch list.
+// Search is single-threaded. UI generateLegal still stack-allocates its own scratch.
+static MoveList s_plyMoves[MAX_SEARCH_PLY + 1];
+static MoveList s_pseudoScratch;
+
 // Quiescence search: only consider captures to avoid horizon effect
 static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta,
                        int qdepth, int ply = 0) {
@@ -198,8 +203,8 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta,
         return 0;
     }
 
-    MoveList moves;
-    ChessRules::generateLegal(board, moves);
+    MoveList& moves = s_plyMoves[ply];
+    ChessRules::generateLegalInto(board, moves, s_pseudoScratch);
     if (moves.count == 0) return inCheck ? -MATE_SCORE + ply : 0;
     if (ChessRules::isDraw50Move(board) ||
         ChessRules::isInsufficientMaterial(board)) return 0;
@@ -227,6 +232,8 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta,
         int16_t score = -quiesce(board, -beta, -alpha, qdepth + 1, ply + 1);
         board.unmakeMove(rec);
 
+        // 0 is both "aborted" and "draw". Do not let the sentinel move the window.
+        if (s_searchAborted) return 0;
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
     }
@@ -236,6 +243,8 @@ static int16_t quiesce(ChessBoard& board, int16_t alpha, int16_t beta,
 
 static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha,
                          int16_t beta, int ply) {
+    if (s_searchAborted) return 0;
+
     // Check time limit periodically
     if ((depth <= 0 || depth % 2 == 0) &&
         static_cast<int32_t>(millis() - s_searchDeadline) >= 0) {
@@ -247,8 +256,8 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha,
         return quiesce(board, alpha, beta, 0, ply);
     }
 
-    MoveList moves;
-    ChessRules::generateLegal(board, moves);
+    MoveList& moves = s_plyMoves[ply];
+    ChessRules::generateLegalInto(board, moves, s_pseudoScratch);
 
     // No legal moves: checkmate or stalemate
     if (moves.count == 0) {
@@ -271,6 +280,8 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha,
         int16_t score = -alphaBeta(board, depth - 1, -beta, -alpha, ply + 1);
         board.unmakeMove(rec);
 
+        // 0 is both "aborted" and "draw". Do not let the sentinel move the window.
+        if (s_searchAborted) return 0;
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
     }
@@ -280,80 +291,96 @@ static int16_t alphaBeta(ChessBoard& board, int depth, int16_t alpha,
 
 // ── Public API ───────────────────────────────────────────────────────
 
-Move ChessAI::findBestMove(ChessBoard& board, AIDifficulty difficulty) {
+Move ChessAI::findBestMove(ChessBoard& board, AIDifficulty difficulty, uint32_t maxTimeMs) {
     // Try opening book first (standard position only)
     if (board.variant() != ChessVariant::Chess960) {
         Move bookMove;
         if (ChessOpeningBook::probe(board, bookMove)) {
+            s_searchDeadline = 0;
+            s_searchAborted = false;
             return bookMove;
         }
     }
 
     int maxDepth;
-    uint32_t maxTimeMs;
+    uint32_t budgetMs;
 
     switch (difficulty) {
-    case AIDifficulty::Easy:   maxDepth = 2; maxTimeMs = 200;  break;
-    case AIDifficulty::Medium: maxDepth = 4; maxTimeMs = 1000; break;
-    case AIDifficulty::Hard:   maxDepth = 6; maxTimeMs = 3000; break;
-    default:                   maxDepth = 3; maxTimeMs = 500;  break;
+    case AIDifficulty::Easy:   maxDepth = 2; budgetMs = 200;  break;
+    case AIDifficulty::Medium: maxDepth = 4; budgetMs = 1000; break;
+    case AIDifficulty::Hard:   maxDepth = 6; budgetMs = 3000; break;
+    default:                   maxDepth = 3; budgetMs = 500;  break;
+    }
+    if (maxTimeMs != 0 && maxTimeMs < budgetMs) budgetMs = maxTimeMs;
+
+    // Deadline 0 means "unset" (firmware always enters that way; we clear it
+    // before returning). A non-zero deadline that is already due, or an abort
+    // latched beforehand, must not be replaced by a fresh budget: the search
+    // would otherwise treat the abort sentinel 0 as a real draw score.
+    const bool deadlineAlreadyDue =
+        s_searchDeadline != 0 &&
+        static_cast<int32_t>(millis() - s_searchDeadline) >= 0;
+    if (s_searchAborted || deadlineAlreadyDue) {
+        s_searchAborted = true;
+    } else {
+        s_searchDeadline = millis() + budgetMs;
+        s_searchAborted = false;
     }
 
-    s_searchDeadline = millis() + maxTimeMs;
-    s_searchAborted = false;
+    // ply 0 stays the root list; alphaBeta/quiesce start at ply 1.
+    MoveList& moves = s_plyMoves[0];
+    ChessRules::generateLegalInto(board, moves, s_pseudoScratch);
 
-    MoveList moves;
-    ChessRules::generateLegal(board, moves);
-
+    Move bestMove{};
     if (moves.count == 0) {
         // Should not happen — caller should check game end first
-        return Move{};
-    }
+        bestMove = Move{};
+    } else if (moves.count == 1) {
+        bestMove = moves.moves[0];
+    } else {
+        sortMoves(moves, board);
+        bestMove = moves.moves[0];
+        int16_t bestScore = -SEARCH_INFINITY;
 
-    // Single legal move — return immediately
-    if (moves.count == 1) {
-        return moves.moves[0];
-    }
-
-    sortMoves(moves, board);
-
-    Move bestMove = moves.moves[0];
-    int16_t bestScore = -SEARCH_INFINITY;
-
-    // Iterative deepening
-    for (int depth = 1; depth <= maxDepth; depth++) {
-        if (s_searchAborted) break;
-
-        Move iterBest = moves.moves[0];
-        int16_t iterBestScore = -SEARCH_INFINITY;
-
-        for (uint16_t i = 0; i < moves.count; i++) {
+        // Iterative deepening. An aborted iteration, including depth 1, is discarded.
+        for (int depth = 1; depth <= maxDepth; depth++) {
             if (s_searchAborted) break;
 
-            MoveRecord rec = board.makeMove(moves.moves[i]);
-            int16_t score = -alphaBeta(board, depth - 1, -SEARCH_INFINITY, -iterBestScore, 1);
-            board.unmakeMove(rec);
+            Move iterBest = moves.moves[0];
+            int16_t iterBestScore = -SEARCH_INFINITY;
 
-            if (!s_searchAborted && score > iterBestScore) {
-                iterBestScore = score;
-                iterBest = moves.moves[i];
+            for (uint16_t i = 0; i < moves.count; i++) {
+                if (s_searchAborted) break;
+
+                MoveRecord rec = board.makeMove(moves.moves[i]);
+                int16_t score = -alphaBeta(board, depth - 1, -SEARCH_INFINITY, -iterBestScore, 1);
+                board.unmakeMove(rec);
+
+                if (s_searchAborted) break;
+                if (score > iterBestScore) {
+                    iterBestScore = score;
+                    iterBest = moves.moves[i];
+                }
+            }
+
+            if (!s_searchAborted) {
+                bestMove = iterBest;
+                bestScore = iterBestScore;
             }
         }
 
-        // Only update best if this iteration completed (or at least found something)
-        if (!s_searchAborted || depth == 1) {
-            bestMove = iterBest;
-            bestScore = iterBestScore;
+        // Easy mode: 30% chance to pick a random legal move instead of the best
+        if (difficulty == AIDifficulty::Easy && moves.count > 1) {
+            if ((esp_random() % 100) < 30) {
+                uint8_t idx = esp_random() % moves.count;
+                bestMove = moves.moves[idx];
+            }
         }
+
+        (void)bestScore;
     }
 
-    // Easy mode: 30% chance to pick a random legal move instead of the best
-    if (difficulty == AIDifficulty::Easy && moves.count > 1) {
-        if ((esp_random() % 100) < 30) {
-            uint8_t idx = esp_random() % moves.count;
-            bestMove = moves.moves[idx];
-        }
-    }
-
+    s_searchDeadline = 0;
+    s_searchAborted = false;
     return bestMove;
 }

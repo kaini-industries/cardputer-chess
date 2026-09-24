@@ -19,21 +19,21 @@ void assertGameHeaderDefaults(const NetGameHeader& header,
 }
 
 void test_wire_layout_has_exact_bounded_packet_sizes() {
-    TEST_ASSERT_EQUAL_UINT8(6, NET_PROTOCOL_VERSION);
-    TEST_ASSERT_EQUAL_UINT8(32, NET_PACKET_MAX_SIZE);
+    TEST_ASSERT_EQUAL_UINT8(7, NET_PROTOCOL_VERSION);
+    TEST_ASSERT_EQUAL_UINT8(64, NET_PACKET_MAX_SIZE);
 
     TEST_ASSERT_EQUAL_UINT32(4, sizeof(NetPairingHeader));
     TEST_ASSERT_EQUAL_UINT32(8, sizeof(NetGameHeader));
-    TEST_ASSERT_EQUAL_UINT32(21, sizeof(DiscoveryMsg));
-    TEST_ASSERT_EQUAL_UINT32(17, sizeof(AcceptGameMsg));
-    TEST_ASSERT_EQUAL_UINT32(13, sizeof(GameStartMsg));
-    TEST_ASSERT_EQUAL_UINT32(8, sizeof(GameStartAckMsg));
-    TEST_ASSERT_EQUAL_UINT32(28, sizeof(MoveNetMsg));
-    TEST_ASSERT_EQUAL_UINT32(15, sizeof(MoveAckMsg));
-    TEST_ASSERT_EQUAL_UINT32(21, sizeof(HeartbeatMsg));
+    TEST_ASSERT_EQUAL_UINT32(53, sizeof(DiscoveryMsg));
+    TEST_ASSERT_EQUAL_UINT32(49, sizeof(AcceptGameMsg));
+    TEST_ASSERT_EQUAL_UINT32(17, sizeof(GameStartMsg));
+    TEST_ASSERT_EQUAL_UINT32(12, sizeof(GameStartAckMsg));
+    TEST_ASSERT_EQUAL_UINT32(32, sizeof(MoveNetMsg));
+    TEST_ASSERT_EQUAL_UINT32(19, sizeof(MoveAckMsg));
+    TEST_ASSERT_EQUAL_UINT32(25, sizeof(HeartbeatMsg));
     TEST_ASSERT_EQUAL_UINT32(10, sizeof(ResignMsg));
-    TEST_ASSERT_EQUAL_UINT32(31, sizeof(ControlNetMsg));
-    TEST_ASSERT_EQUAL_UINT32(20, sizeof(ControlAckMsg));
+    TEST_ASSERT_EQUAL_UINT32(35, sizeof(ControlNetMsg));
+    TEST_ASSERT_EQUAL_UINT32(24, sizeof(ControlAckMsg));
 
     TEST_ASSERT_EQUAL_UINT32(0, offsetof(DiscoveryMsg, header));
     TEST_ASSERT_EQUAL_UINT32(0, offsetof(AcceptGameMsg, header));
@@ -46,6 +46,15 @@ void test_wire_layout_has_exact_bounded_packet_sizes() {
     TEST_ASSERT_EQUAL_UINT32(13, offsetof(HeartbeatMsg, positionEpoch));
     TEST_ASSERT_EQUAL_UINT32(15, offsetof(HeartbeatMsg, lastAppliedSequence));
     TEST_ASSERT_EQUAL_UINT32(16, offsetof(ControlAckMsg, clockRemainingMs));
+    TEST_ASSERT_EQUAL_UINT32(21, offsetof(DiscoveryMsg, publicKey));
+    TEST_ASSERT_EQUAL_UINT32(17, offsetof(AcceptGameMsg, publicKey));
+    TEST_ASSERT_EQUAL_UINT32(13, offsetof(GameStartMsg, tag));
+    TEST_ASSERT_EQUAL_UINT32(8, offsetof(GameStartAckMsg, tag));
+    TEST_ASSERT_EQUAL_UINT32(28, offsetof(MoveNetMsg, tag));
+    TEST_ASSERT_EQUAL_UINT32(15, offsetof(MoveAckMsg, tag));
+    TEST_ASSERT_EQUAL_UINT32(21, offsetof(HeartbeatMsg, tag));
+    TEST_ASSERT_EQUAL_UINT32(31, offsetof(ControlNetMsg, tag));
+    TEST_ASSERT_EQUAL_UINT32(20, offsetof(ControlAckMsg, tag));
 
     TEST_ASSERT_TRUE(sizeof(DiscoveryMsg) <= NET_PACKET_MAX_SIZE);
     TEST_ASSERT_TRUE(sizeof(AcceptGameMsg) <= NET_PACKET_MAX_SIZE);

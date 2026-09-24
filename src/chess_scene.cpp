@@ -286,6 +286,16 @@ void ChessScene::onTick(uint32_t dt_ms) {
         saveGameState();
     }
 
+    // A running local or AI clock is not marked dirty by think time. Snapshot
+    // it at most once every five seconds so a power loss cannot refund the
+    // time spent since the last move. Online games stay unsaved.
+    if (!m_puzzleMode && m_netMode == NetworkMode::Local &&
+        m_clock.enabled() && m_clock.isRunning() &&
+        !presentingFinishedGame && m_resultOutcome == GameOutcome::None &&
+        (millis() - m_lastGameSaveAttempt) >= 5000) {
+        saveGameState();
+    }
+
     // ── Puzzle auto-play opponent response ──────────────────
     if (m_puzzleMode && m_puzzleAutoPlayPending && !m_moveAnim.active) {
         m_puzzleAutoPlayDelay -= (int32_t)dt_ms;
@@ -329,8 +339,14 @@ void ChessScene::onTick(uint32_t dt_ms) {
             m_aiThinking = true;
             updateStatusBar();
         } else {
-            // Phase 2: run the search
-            Move aiMove = ChessAI::findBestMove(m_board, m_aiDifficulty);
+            // Phase 2: run the search. A zero cap means the difficulty budget,
+            // so a flagged clock passes 1 ms instead of lifting the cap.
+            uint32_t aiTimeCapMs = 0;
+            if (m_clock.enabled()) {
+                aiTimeCapMs = m_clock.remainingMsAt(m_board.sideToMove(), millis());
+                if (aiTimeCapMs == 0) aiTimeCapMs = 1;
+            }
+            Move aiMove = ChessAI::findBestMove(m_board, m_aiDifficulty, aiTimeCapMs);
             m_aiThinking = false;
 
             // Validate move before executing (defense-in-depth)
@@ -1665,6 +1681,31 @@ void ChessScene::leaveOnlineGame(bool force, bool discardUnsavedResult) {
     CardGFX::scenes().pop();
 }
 
+void ChessScene::quitUnfinishedOnlineGame() {
+    if (m_netMode != NetworkMode::Online || m_leavingToMenu ||
+        m_resultOutcome != GameOutcome::None) {
+        return;
+    }
+    // Finish as a local loss and send the MACed GameEnd now. leaveOnlineGame
+    // still waits for the terminal drain or the Quit Anyway path.
+    // Reuse an in-flight control id so the peer is still waiting for this
+    // event. A fresh id is rejected as out of sequence.
+    if (m_controlAwaitingAck && m_pendingControl.eventId != 0) {
+        m_nextControlEventId = m_pendingControl.eventId;
+    }
+    m_finishDrawOnAck = false;
+    m_clockPausedForDrawAccept = false;
+    m_timeGiftPending = false;
+    m_controlAwaitingAck = false;
+    m_hasQueuedControl = false;
+    m_pendingControl = ControlNetMsg{};
+    const GameOutcome outcome = m_localColor == PieceColor::White
+        ? GameOutcome::BlackWin : GameOutcome::WhiteWin;
+    finishGame(outcome, TerminationReason::Resignation, "Resigned",
+               outcome == GameOutcome::WhiteWin ? "White wins!" : "Black wins!",
+               true);
+}
+
 void ChessScene::showUnsavedResultModal(bool online) {
     m_actionModal.clearButtons();
     m_actionModal.setTitle("Result Not Saved");
@@ -2433,6 +2474,8 @@ uint32_t saturatingAddMs(uint32_t value, uint32_t addition) {
     return addition > maximum - value ? maximum : value + addition;
 }
 
+constexpr uint32_t kRemoteClockSkewMs = 200;
+
 NetGameResult toNetResult(GameOutcome outcome) {
     switch (outcome) {
         case GameOutcome::WhiteWin: return NetGameResult::WhiteWin;
@@ -2507,13 +2550,36 @@ const char* terminalTitle(TerminationReason termination) {
 
 } // namespace
 
+bool ChessScene::remoteClockRaiseAllowed(PieceColor color, uint32_t sampleMs,
+                                         uint32_t maxRaiseMs) const {
+    if (!m_clock.enabled()) return true;
+    const uint8_t index = static_cast<uint8_t>(color);
+    if (index > 1 || !m_hasRemoteClockBaseline[index]) return true;
+    return sampleMs <= saturatingAddMs(m_remoteClockBaselineMs[index], maxRaiseMs);
+}
+
+void ChessScene::acceptRemoteClockSample(PieceColor color, uint32_t sampleMs) {
+    if (!m_clock.enabled()) return;
+    const uint8_t index = static_cast<uint8_t>(color);
+    if (index > 1) return;
+    m_hasRemoteClockBaseline[index] = true;
+    m_remoteClockBaselineMs[index] = sampleMs;
+}
+
 void ChessScene::setNetworkMode(PieceColor localColor, uint32_t sessionId,
                                 uint16_t gameId,
                                 const uint8_t opponentMac[6],
                                 const char* localName,
                                 const char* opponentName,
-                                bool reackGameStart) {
+                                bool reackGameStart,
+                                const uint8_t macKey[NetCrypto::KEY_SIZE]) {
     m_netMode = NetworkMode::Online;
+    if (macKey != nullptr) std::memcpy(m_macKey, macKey, sizeof(m_macKey));
+    else std::memset(m_macKey, 0, sizeof(m_macKey));
+    m_hasRemoteClockBaseline[0] = false;
+    m_hasRemoteClockBaseline[1] = false;
+    m_remoteClockBaselineMs[0] = 0;
+    m_remoteClockBaselineMs[1] = 0;
     m_localColor = localColor;
     m_sessionId = sessionId;
     m_networkGameId = gameId;
@@ -2608,6 +2674,11 @@ void ChessScene::clearNetworkMode() {
     std::memset(m_opponentMac, 0, sizeof(m_opponentMac));
     std::memset(m_opponentName, 0, sizeof(m_opponentName));
     m_reackGameStart = false;
+    std::memset(m_macKey, 0, sizeof(m_macKey));
+    m_hasRemoteClockBaseline[0] = false;
+    m_hasRemoteClockBaseline[1] = false;
+    m_remoteClockBaselineMs[0] = 0;
+    m_remoteClockBaselineMs[1] = 0;
     m_nextMoveSequence = 1;
     m_lastSentSeq = 0;
     m_expectedRemoteSequence = 1;
@@ -2645,6 +2716,7 @@ void ChessScene::sendMove(const Move& move, uint32_t preBoardHash,
     m_lastSentMove = moveToNetMsg(
         move, sequence, m_networkGameId, m_sessionId,
         moverRemaining, preBoardHash, postBoardHash);
+    stampSessionPacket(&m_lastSentMove, sizeof(m_lastSentMove), m_macKey);
     m_lastSentSeq = sequence;
     m_lastSentPostHash = postBoardHash;
     m_awaitingAck = true;
@@ -2665,6 +2737,7 @@ void ChessScene::sendHeartbeat() {
     hb.positionEpoch = m_positionEpoch;
     hb.lastAppliedSequence = m_lastAppliedRemoteSequence;
     hb.boardHash = ChessZobrist::hash(m_board);
+    stampSessionPacket(&hb, sizeof(hb), m_macKey);
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&hb), sizeof(hb));
 }
@@ -2673,6 +2746,7 @@ void ChessScene::sendGameStartAck() {
     GameStartAckMsg ack;
     ack.header.gameId = m_networkGameId;
     ack.header.sessionId = m_sessionId;
+    stampSessionPacket(&ack, sizeof(ack), m_macKey);
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
 }
@@ -2685,6 +2759,7 @@ void ChessScene::sendMoveAck(const MoveNetMsg& msg, NetAckStatus status,
     ack.sequence = msg.sequence;
     ack.status = status;
     ack.boardHash = boardHash;
+    stampSessionPacket(&ack, sizeof(ack), m_macKey);
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
 }
@@ -2704,7 +2779,8 @@ void ChessScene::pollNetwork() {
 
         switch (msgType) {
         case NetMsgType::MoveMsg:
-            if (len == sizeof(MoveNetMsg)) {
+            if (len == sizeof(MoveNetMsg) &&
+                sessionPacketTagMatches(buf, len, m_macKey)) {
                 MoveNetMsg moveMsg;
                 memcpy(&moveMsg, buf, sizeof(moveMsg));
                 if (isValidGameHeader(moveMsg.header, NetMsgType::MoveMsg,
@@ -2716,7 +2792,8 @@ void ChessScene::pollNetwork() {
             break;
 
         case NetMsgType::MoveAck:
-            if (len == sizeof(MoveAckMsg)) {
+            if (len == sizeof(MoveAckMsg) &&
+                sessionPacketTagMatches(buf, len, m_macKey)) {
                 MoveAckMsg ack;
                 memcpy(&ack, buf, sizeof(ack));
                 if (isValidGameHeader(ack.header, NetMsgType::MoveAck,
@@ -2740,7 +2817,10 @@ void ChessScene::pollNetwork() {
             break;
 
         case NetMsgType::Heartbeat: {
-            if (len != sizeof(HeartbeatMsg)) break;
+            if (len != sizeof(HeartbeatMsg) ||
+                !sessionPacketTagMatches(buf, len, m_macKey)) {
+                break;
+            }
             HeartbeatMsg heartbeat;
             memcpy(&heartbeat, buf, sizeof(heartbeat));
             if (!isValidGameHeader(heartbeat.header, NetMsgType::Heartbeat,
@@ -2772,9 +2852,12 @@ void ChessScene::pollNetwork() {
                     !reviewingFinishedGame && m_clock.enabled() &&
                     active == opponent(m_localColor) &&
                     active == m_board.sideToMove() &&
-                    m_uiState != UIState::GameOver) {
+                    m_uiState != UIState::GameOver &&
+                    remoteClockRaiseAllowed(active, heartbeat.activeRemainingMs,
+                                            kRemoteClockSkewMs)) {
                     m_clock.setRemainingMs(active,
                                            heartbeat.activeRemainingMs, now);
+                    acceptRemoteClockSample(active, heartbeat.activeRemainingMs);
                     updateStatusBar();
                 }
             } else if (relation == NetPositionRelation::PeerAheadOne) {
@@ -2792,7 +2875,8 @@ void ChessScene::pollNetwork() {
         }
 
         case NetMsgType::ControlMsg:
-            if (len == sizeof(ControlNetMsg)) {
+            if (len == sizeof(ControlNetMsg) &&
+                sessionPacketTagMatches(buf, len, m_macKey)) {
                 ControlNetMsg control;
                 memcpy(&control, buf, sizeof(control));
                 if (isValidGameHeader(control.header,
@@ -2805,7 +2889,8 @@ void ChessScene::pollNetwork() {
             break;
 
         case NetMsgType::ControlAck:
-            if (len == sizeof(ControlAckMsg)) {
+            if (len == sizeof(ControlAckMsg) &&
+                sessionPacketTagMatches(buf, len, m_macKey)) {
                 ControlAckMsg ack;
                 memcpy(&ack, buf, sizeof(ack));
                 if (isValidGameHeader(ack.header, NetMsgType::ControlAck,
@@ -2830,6 +2915,14 @@ void ChessScene::pollNetwork() {
                             onConnectionLost("Gift confirmation mismatch");
                             break;
                         }
+                        if (completesTimeGift && m_clock.enabled() &&
+                            !remoteClockRaiseAllowed(
+                                m_timeGiftRecipient, ack.clockRemainingMs,
+                                saturatingAddMs(15000, kRemoteClockSkewMs))) {
+                            m_controlAwaitingAck = false;
+                            onConnectionLost("Clock out of sync");
+                            break;
+                        }
                         const bool completesTerminalReceipt =
                             m_pendingControl.control ==
                                 NetControlType::GameEnd;
@@ -2843,6 +2936,8 @@ void ChessScene::pollNetwork() {
                             m_clock.setRemainingMs(
                                 m_timeGiftRecipient,
                                 ack.clockRemainingMs, now);
+                            acceptRemoteClockSample(m_timeGiftRecipient,
+                                                    ack.clockRemainingMs);
                             m_timeGiftPending = false;
                             m_pendingControl = ControlNetMsg{};
                             updateStatusBar();
@@ -2953,7 +3048,8 @@ void ChessScene::pollNetwork() {
             break;
 
         case NetMsgType::GameStart:
-            if (m_reackGameStart && len == sizeof(GameStartMsg)) {
+            if (m_reackGameStart && len == sizeof(GameStartMsg) &&
+                sessionPacketTagMatches(buf, len, m_macKey)) {
                 GameStartMsg start;
                 memcpy(&start, buf, sizeof(start));
                 if (isValidGameHeader(start.header, NetMsgType::GameStart,
@@ -2968,25 +3064,9 @@ void ChessScene::pollNetwork() {
             }
             break;
 
-        case NetMsgType::Resign: {
-            if (len == sizeof(ResignMsg)) {
-                ResignMsg resign;
-                memcpy(&resign, buf, sizeof(resign));
-                if (isValidGameHeader(resign.header, NetMsgType::Resign,
-                                      m_networkGameId, m_sessionId)) {
-                    noteValidPeerPacket(now);
-                    const GameOutcome outcome =
-                        m_localColor == PieceColor::White
-                            ? GameOutcome::WhiteWin : GameOutcome::BlackWin;
-                    finishGame(outcome, TerminationReason::Resignation,
-                               "Opponent Resigned",
-                               m_localColor == PieceColor::White
-                                   ? "White wins!" : "Black wins!",
-                               false);
-                }
-            }
+        case NetMsgType::Resign:
+            // Legacy one-way resign is ignored even when the header is valid.
             break;
-        }
 
         default:
             break;
@@ -3033,7 +3113,7 @@ void ChessScene::pollNetwork() {
             m_actionModal.setEscapeCallback(keepWaitingForDraw);
             m_actionModal.addButton("Keep Waiting", keepWaitingForDraw);
             m_actionModal.addButton("Quit", [this]() {
-                leaveOnlineGame();
+                quitUnfinishedOnlineGame();
             });
             m_actionModal.show();
             focusChain().focusWidget(&m_actionModal);
@@ -3155,6 +3235,16 @@ void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
         return;
     }
 
+    const PieceColor mover = opponent(m_localColor);
+    if (m_clock.enabled() &&
+        !remoteClockRaiseAllowed(
+            mover, msg.moverRemainingMs,
+            saturatingAddMs(m_clock.incrementMs(), kRemoteClockSkewMs))) {
+        sendMoveAck(msg, NetAckStatus::Rejected, currentHash);
+        onConnectionLost("Clock out of sync");
+        return;
+    }
+
     // A valid reply proves that the peer applied our preceding move even if
     // its explicit ACK was the packet that got lost.
     m_awaitingAck = false;
@@ -3176,6 +3266,9 @@ void ChessScene::onRemoteMoveReceived(const MoveNetMsg& msg) {
         return;
     }
 
+    if (m_clock.enabled()) {
+        acceptRemoteClockSample(opponent(m_localColor), msg.moverRemainingMs);
+    }
     m_lastAppliedRemoteSequence = msg.sequence;
     m_lastRemotePreHash = msg.preBoardHash;
     m_lastRemotePostHash = msg.postBoardHash;
@@ -3205,6 +3298,7 @@ bool ChessScene::sendControl(NetControlType control, uint8_t arg0,
     message.eventId = m_nextControlEventId;
     advanceNonZero(m_nextControlEventId);
 
+    stampSessionPacket(&message, sizeof(message), m_macKey);
     m_pendingControl = message;
     m_controlAwaitingAck = true;
     m_controlRetryCount = 0;
@@ -3228,6 +3322,7 @@ void ChessScene::sendQueuedControl(bool reusePendingEventId) {
         message.eventId = m_nextControlEventId;
         advanceNonZero(m_nextControlEventId);
     }
+    stampSessionPacket(&message, sizeof(message), m_macKey);
     m_pendingControl = message;
     m_controlAwaitingAck = true;
     m_controlRetryCount = 0;
@@ -3270,6 +3365,7 @@ void ChessScene::sendControlAck(const ControlNetMsg& msg,
             m_clock.remainingMsAt(m_localColor, millis());
     }
     ack.boardHash = ChessZobrist::hash(m_board);
+    stampSessionPacket(&ack, sizeof(ack), m_macKey);
     EspNowTransport::instance().send(
         reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
 }
@@ -3371,7 +3467,10 @@ void ChessScene::onControlReceived(const ControlNetMsg& msg) {
                             ChessRules::isInsufficientMaterial(m_board);
                     break;
                 case TerminationReason::Resignation:
+                    // Quit forfeits on either turn. The hash still binds the
+                    // packet to this position, and the sender cannot claim a win.
                     valid = msg.relatedEventId == 0 &&
+                            msg.boardHash == boardHash &&
                             remoteOutcome == receiverWin;
                     break;
                 case TerminationReason::Timeout: {
@@ -3758,7 +3857,7 @@ void ChessScene::onConnectionLost(const char* message) {
     m_actionModal.setEscapeCallback(waitForConnection);
     m_actionModal.addButton("Wait", waitForConnection);
     m_actionModal.addButton("Quit", [this]() {
-        leaveOnlineGame();
+        quitUnfinishedOnlineGame();
     });
 
     m_actionModal.show();
