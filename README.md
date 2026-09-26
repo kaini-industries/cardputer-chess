@@ -6,7 +6,7 @@ A chess game for the M5Stack Cardputer Advance featuring local pass-and-play, AI
 
 ## Development Status
 
-The v0.20.0 release implements the first post-testing improvement pass: conventional chess-clock behavior, synchronized timed multiplayer, named ESP-NOW opponents, a more reliable session protocol, profiles and recent result summaries, draw offers, a +15-second time gift, clarified review labels, and revised keyboard controls. Full premoves, complete-game replay archives, and a win celebration remain intentionally deferred as larger enhancements.
+The v0.21.0 release authenticates ESP-NOW sessions. Both devices show a 6-digit pair code, and every session packet carries a truncated HMAC. v0.20.0 peers are rejected, so both Cardputers must upgrade together. Timed local and AI games save the running clock at least every five seconds, two knights versus a lone king are a draw, and puzzle categories open the first unsolved puzzle of that type. Full premoves, complete-game replay archives, and a win celebration remain intentionally deferred as larger enhancements.
 
 ## Features
 
