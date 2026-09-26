@@ -13,7 +13,7 @@ artifacts proposed for publication.
       version, README release status, staged directory, artifact filenames, and
       `release-manifest.json`.
 - [ ] Confirm the intended ESP-NOW protocol version in code, the manifest, and
-      release notes. Current source uses protocol v6.
+      release notes. Current source uses protocol v7.
 - [ ] Run the native ASan/UBSan suite and a clean `cardputer-adv` production
       build. Save the CI run URL and complete logs.
 - [ ] Confirm the app fits the `0x300000` app partition and every merged segment
@@ -42,7 +42,7 @@ date, and pass/fail evidence.
       the approved factory image.
 - [ ] Smoke-test Local, AI, puzzle, timed, save/resume, review, and game-over
       flows, including conventional first-move clock behavior.
-- [ ] With both devices on protocol v6, verify host discovery, displayed opponent
+- [ ] With both devices on protocol v7, verify host discovery, displayed opponent
       name/MAC suffix, timed and untimed pairing, move acknowledgements, clock
       synchronization, draw offer/response, time gift, terminal result, and
       disconnect/reconnect behavior.
